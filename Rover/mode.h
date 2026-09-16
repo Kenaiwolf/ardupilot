@@ -289,7 +289,7 @@ public:
     bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2, int16_t &arg3, int16_t &arg4);
     void nav_script_time_done(uint16_t id);
 
-    // 
+    //
     void init_reversed_flag() override {
         if (!mission.is_resume()) {
             set_reversed(false);
@@ -676,6 +676,10 @@ protected:
 
     Location _destination;      // target location to hold position around
     float _desired_speed;       // desired speed (ramped down from initial speed to zero)
+
+    // wind+current drift detection state (see ModeLoiter::update())
+    float _drift_dist_prev;         // previous tick's _distance_to_destination, used to detect a rising trend while coasting
+    uint16_t _drift_rising_count;   // number of consecutive ticks distance has risen while throttle is ~0
 };
 
 class ModeManual : public Mode
