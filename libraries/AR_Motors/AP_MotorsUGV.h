@@ -162,7 +162,7 @@ private:
     // disable omni motor and remove all throttle, steering and lateral factor for this motor
     void clear_omni_motors(int8_t motor_num);
 
-    // output to regular steering and throttle channels  
+    // output to regular steering and throttle channels
     void output_regular(bool armed, float ground_speed, float steering, float throttle, float dt);
 
     // output to skid steering channels
@@ -215,27 +215,27 @@ private:
     AP_Int8 _throttle_max; // throttle maximum percentage
     AP_Float _thrust_curve_expo; // thrust curve exponent from -1 to +1 with 0 being linear
     AP_Float _thrust_asymmetry; // asymmetry factor, how much better your skid-steering motors are at going forward than backwards (forward/backward thrust ratio)
-    AP_Float _vector_angle_max;  // angle between steering's middle position and maximum position when using vectored thrust.  zero to disable vectored thrust  
-    AP_Float _speed_scale_base;  // speed above which steering is scaled down when using regular steering/throttle vehicles.  zero to disable speed scaling  
-    AP_Float _steering_throttle_mix; // Steering vs Throttle priorisation.  Higher numbers prioritise steering, lower numbers prioritise throttle.  Only valid for Skid Steering vehicles  
-    AP_Float _reverse_delay; // delay in seconds when reversing motor  
-    AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power  
-    AP_Float _vec_blend_thr;     // filtered throttle (0~1) at/above which vectored-thrust steering uses pure atan/cos; below this it blends toward direct angle mapping.  zero disables blending (legacy atan behaviour)  
-    AP_Float _vec_deadband;      // vector magnitude (steering_norm, filtered throttle) below which vectored-thrust steering angle is held at its last value  
+    AP_Float _vector_angle_max;  // angle between steering's middle position and maximum position when using vectored thrust.  zero to disable vectored thrust
+    AP_Float _speed_scale_base;  // speed above which steering is scaled down when using regular steering/throttle vehicles.  zero to disable speed scaling
+    AP_Float _steering_throttle_mix; // Steering vs Throttle priorisation.  Higher numbers prioritise steering, lower numbers prioritise throttle.  Only valid for Skid Steering vehicles
+    AP_Float _reverse_delay; // delay in seconds when reversing motor
+    AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power
+    AP_Float _vec_blend_thr;     // filtered throttle (0~1) at/above which vectored-thrust steering uses pure atan/cos; below this it blends toward direct angle mapping.  zero disables blending (legacy atan behaviour)
+    AP_Float _vec_deadband;      // vector magnitude (steering_norm, filtered throttle) below which vectored-thrust steering angle is held at its last value
     AP_Float _vec_resid_tc;      // time constant (seconds) of low-pass filter applied to throttle before use in vectored-thrust steering blend, to distinguish a sudden throttle step from steady cruising thrust
 
     // internal variables
-    float   _steering;  // requested steering as a value from -4500 to +4500  
-    float   _throttle;  // requested throttle as a value from -100 to 100  
-    float   _throttle_prev; // throttle input from previous iteration  
-    float   _throttle_limit = 1.0f;  // used for current limiting  
-    bool    _scale_steering = true; // true if we should scale steering by speed or angle  
-    float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend  
+    float   _steering;  // requested steering as a value from -4500 to +4500
+    float   _throttle;  // requested throttle as a value from -100 to 100
+    float   _throttle_prev; // throttle input from previous iteration
+    float   _throttle_limit = 1.0f;  // used for current limiting
+    bool    _scale_steering = true; // true if we should scale steering by speed or angle
+    float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend
     float   _vec_last_steering_angle_rad; // last commanded vectored-thrust steering angle (rad), held during deadband
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1
     float   _pitch;     // requested pitch as a value from -1 to +1
-    float   _walking_height; // requested height as a value from -1 to +1   
+    float   _walking_height; // requested height as a value from -1 to +1
     float   _mainsail;  // requested mainsail input as a value from 0 to 100
     float   _wingsail;  // requested wing sail input as a value in the range +- 100
     float   _mast_rotation;  // requested mast rotation input as a value in the range +- 100
