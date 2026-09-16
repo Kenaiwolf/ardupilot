@@ -129,17 +129,39 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("REV_DELAY", 15, AP_MotorsUGV, _reverse_delay, 0),
 
-#if AP_BATTERY_WATT_MAX_ENABLED
-    // @Param: BAT_WATT_TC
-    // @DisplayName: Battery power limiting time constant
-    // @Description: Time constant used to limit the smooth power throttling.
-    // @Range: 0 10
-    // @Units: s
-    // @User: Advanced
-    AP_GROUPINFO("BAT_WATT_TC", 16, AP_MotorsUGV, _batt_power_time_constant, 2.0f),
-#endif
-
-    AP_GROUPEND
+#if AP_BATTERY_WATT_MAX_ENABLED  
+    // @Param: BAT_WATT_TC  
+    // @DisplayName: Battery power limiting time constant  
+    // @Description: Time constant used to limit the smooth power throttling.  
+    // @Range: 0 10  
+    // @Units: s  
+    // @User: Advanced  
+    AP_GROUPINFO("BAT_WATT_TC", 16, AP_MotorsUGV, _batt_power_time_constant, 2.0f),  
+#endif  
+  
+    // @Param: VEC_BLEND_THR  
+    // @DisplayName: Vectored thrust low-speed blend throttle threshold  
+    // @Description: Filtered throttle (0 to 1, normalised) at or above which vectored-thrust steering angle is computed with the standard atan(steering/throttle) formula. Below this value the steering angle progressively blends toward a direct steering-proportional angle to avoid the atan() instability as throttle approaches zero. Zero disables blending (legacy behaviour).  
+    // @Range: 0.0 1.0  
+    // @User: Advanced  
+    AP_GROUPINFO("VEC_BLEND_THR", 17, AP_MotorsUGV, _vec_blend_thr, 0.3f),  
+  
+    // @Param: VEC_DEADBAND  
+    // @DisplayName: Vectored thrust command deadband  
+    // @Description: Combined magnitude of normalised steering and filtered throttle demand below which the vectored-thrust steering angle is held at its last commanded value instead of being recalculated. Prevents steering micro-jitter when both steering and throttle demand are near zero.  
+    // @Range: 0.0 0.2  
+    // @User: Advanced  
+    AP_GROUPINFO("VEC_DEADBAND", 18, AP_MotorsUGV, _vec_deadband, 0.03f),  
+  
+    // @Param: VEC_RESID_TC  
+    // @DisplayName: Vectored thrust throttle filter time constant  
+    // @Description: Time constant of the low-pass filter applied to throttle before it is used in the vectored-thrust steering blend (see VEC_BLEND_THR). Distinguishes a sudden throttle step (no real thrust/water-speed yet) from steady cruising thrust. Zero disables filtering.  
+    // @Units: s  
+    // @Range: 0.0 5.0  
+    // @User: Advanced  
+    AP_GROUPINFO("VEC_RESID_TC", 19, AP_MotorsUGV, _vec_resid_tc, 0.5f),  
+  
+    AP_GROUPEND  
 };
 
 AP_MotorsUGV::AP_MotorsUGV(AP_WheelRateControl& rate_controller) :
@@ -354,8 +376,8 @@ void AP_MotorsUGV::output(bool armed, float ground_speed, float dt)
     power_limit_throttle(dt);
 #endif
 
-    // output for regular steering/throttle style frames
-    output_regular(armed, ground_speed, _steering, _throttle);
+    // output for regular steering/throttle style frames  
+    output_regular(armed, ground_speed, _steering, _throttle, dt);
 
     // output for skid steering style frames
     output_skid_steering(armed, _steering, _throttle, dt);
@@ -728,52 +750,86 @@ void AP_MotorsUGV::clear_omni_motors(int8_t motor_num)
     }
 }
 
-// output to regular steering and throttle channels
-void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering, float throttle)
-{
-    // output to throttle channels
-    if (armed) {
-        if (_scale_steering) {
-            // vectored thrust handling
-            if (have_vectored_thrust()) {
-
-                // normalise desired steering and throttle to ease calculations
-                float steering_norm = steering / 4500.0f;
-                const float throttle_norm = throttle * 0.01f;
-
-                // steering can never be more than throttle * tan(_vector_angle_max)
-                const float vector_angle_max_rad = radians(constrain_float(_vector_angle_max, 0.0f, 90.0f));
-                const float steering_norm_lim = fabsf(throttle_norm * tanf(vector_angle_max_rad));
-                if (fabsf(steering_norm) > steering_norm_lim) {
-                    if (is_positive(steering_norm)) {
-                        steering_norm = steering_norm_lim;
-                    }
-                    if (is_negative(steering_norm)) {
-                        steering_norm = -steering_norm_lim;
-                    }
-                    limit.steer_right = true;
-                    limit.steer_left = true;
-                }
-
-                if (!is_zero(throttle_norm)) {
-                    // calculate steering angle
-                    float steering_angle_rad = atanf(steering_norm / throttle_norm);
-                    // limit steering angle to vector_angle_max
-                    if (fabsf(steering_angle_rad) > vector_angle_max_rad) {
-                        steering_angle_rad = constrain_float(steering_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);
-                        limit.steer_right = true;
-                        limit.steer_left = true;
-                     }
-
-                    // convert steering angle to steering output
-                    steering = steering_angle_rad / vector_angle_max_rad * 4500.0f;
-
-                    // scale up throttle to compensate for steering angle
-                    const float throttle_scaler_inv = cosf(steering_angle_rad);
-                    if (!is_zero(throttle_scaler_inv)) {
-                        throttle /= throttle_scaler_inv;
-                    }
-                }
+// output to regular steering and throttle channels  
+void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering, float throttle, float dt)  
+{  
+    // output to throttle channels  
+    if (armed) {  
+        if (_scale_steering) {  
+            // vectored thrust handling  
+            if (have_vectored_thrust()) {  
+  
+                // normalise desired steering and throttle to ease calculations  
+                const float steering_norm = steering / 4500.0f;  
+                const float throttle_norm = throttle * 0.01f;  
+                const float vector_angle_max_rad = radians(constrain_float(_vector_angle_max, 0.0f, 90.0f));  
+  
+                // low-pass filter throttle to distinguish a sudden step from standstill  
+                // from genuinely steady low-speed cruising  
+                if (is_positive(_vec_resid_tc) && is_positive(dt)) {  
+                    const float alpha = constrain_float(dt / (_vec_resid_tc + dt), 0.0f, 1.0f);  
+                    _vec_throttle_filt += (throttle_norm - _vec_throttle_filt) * alpha;  
+                } else {  
+                    _vec_throttle_filt = throttle_norm;  
+                }  
+  
+                // commanded vector magnitude, used for the low-command deadband  
+                const float vec_mag = sqrtf(sq(steering_norm) + sq(throttle_norm));  
+  
+                float steering_angle_rad;  
+                // continuous blend weight: w=1 (pure direct/quadrant, no throttle boost) when  
+                // throttle_filt is negligible or the whole command is inside the deadband,  
+                // w=0 (pure legacy atan()/cos() behaviour) at |throttle_filt| >= _vec_blend_thr  
+                // default to legacy atan()/cos() behaviour (w=0) when blend is disabled  
+                float w = 0.0f;  
+  
+                if (fabsf(vec_mag) < _vec_deadband) {  
+                    // both steering and throttle demand are negligible: freeze angle to  
+                    // suppress jitter instead of letting atan() amplify noise  
+                    steering_angle_rad = _vec_last_steering_angle_rad;  
+                    // w stays at its default of 0.0f: no throttle boost while frozen  
+                } else {
+                    // direct/quadrant-based angle: proportional to steering demand only,  
+                    // sign-folded for reverse (throttle_filt < 0) so the thruster points  
+                    // the correct physical way instead of atan()'s incorrect mirrored sign  
+                    float direct_angle_rad = constrain_float(steering_norm, -1.0f, 1.0f) * vector_angle_max_rad;  
+                    if (is_negative(_vec_throttle_filt)) {  
+                        direct_angle_rad = -direct_angle_rad;  
+                    }  
+  
+                    // legacy atan() angle, only well-behaved away from throttle_filt==0  
+                    float atan_angle_rad = 0.0f;  
+                    if (!is_zero(_vec_throttle_filt)) {  
+                        atan_angle_rad = atanf(steering_norm / _vec_throttle_filt);  
+                        atan_angle_rad = constrain_float(atan_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);  
+                    }  
+  
+                    if (is_positive(_vec_blend_thr)) {  
+                        w = 1.0f - constrain_float(fabsf(_vec_throttle_filt) / _vec_blend_thr, 0.0f, 1.0f);  
+                    }  
+                    // if _vec_blend_thr <= 0, w stays 0.0f -> pure legacy atan()/cos(), as documented  
+  
+                    steering_angle_rad = w * direct_angle_rad + (1.0f - w) * atan_angle_rad;  
+                    steering_angle_rad = constrain_float(steering_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);  
+  
+                    if (fabsf(steering_angle_rad) >= vector_angle_max_rad) {  
+                        limit.steer_right = true;  
+                        limit.steer_left = true;  
+                    }  
+  
+                    _vec_last_steering_angle_rad = steering_angle_rad;  
+                }  
+  
+                // convert steering angle to steering output  
+                steering = steering_angle_rad / vector_angle_max_rad * 4500.0f;  
+  
+                // scale up throttle to compensate for steering angle, blended by the same w  
+                // computed above: w=1 -> no boost (scaler=1), w=0 -> full cos() boost,  
+                // matching original behaviour  
+                const float throttle_scaler_inv = w + (1.0f - w) * cosf(steering_angle_rad);  
+                if (!is_zero(throttle_scaler_inv)) {  
+                    throttle /= throttle_scaler_inv;  
+                } 
             } else {
                 // scale steering down as speed increase above MOT_SPD_SCA_BASE (1 m/s default)
                 if (is_positive(_speed_scale_base) && (fabsf(ground_speed) > _speed_scale_base)) {
