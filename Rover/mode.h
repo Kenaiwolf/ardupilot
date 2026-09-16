@@ -677,9 +677,11 @@ protected:
     Location _destination;      // target location to hold position around
     float _desired_speed;       // desired speed (ramped down from initial speed to zero)
 
-    // wind+current drift detection state (see ModeLoiter::update())
-    float _drift_dist_prev;         // previous tick's _distance_to_destination, used to detect a rising trend while coasting
-    uint16_t _drift_rising_count;   // number of consecutive ticks distance has risen while throttle is ~0
+    // current/wind drift-estimate detection state
+    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample
+    static constexpr float LOITER_DRIFT_THR_PCT = 1.0f;          // throttle output (%) below which the vehicle is considered to be coasting for drift sampling purposes
+    float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend
+    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting
 };
 
 class ModeManual : public Mode

@@ -15,9 +15,9 @@ bool ModeLoiter::_enter()
     // initialise heading to current heading
     _desired_yaw_cd = ahrs.yaw_sensor;
 
-    // reset drift-detection state so a stale trend from a previous loiter
-    // entry is never reused
-    _drift_dist_prev = _distance_to_destination;
+    // reset drift-estimate detection state so stale data from a previous
+    // loiter session doesn't leak into this one
+    _drift_last_distance = _distance_to_destination;
     _drift_rising_count = 0;
 
     return true;
@@ -41,27 +41,24 @@ void ModeLoiter::update()
             _desired_yaw_cd = degrees(g2.windvane.get_true_wind_direction_rad()) * 100.0f;
         }
 
-        // wind+current drift detection: while coasting (throttle ~0) inside the
-        // loiter radius, a consistently rising distance-to-destination means the
-        // vehicle is being pushed by wind+current rather than by commanded thrust.
-        // Once that trend is established, sample ground velocity directly as the
-        // drift vector (direction and magnitude both).
-        if (!g2.sailboat.tack_enabled() && (fabsf(g2.motors.get_throttle()) < 1.0f)) {
-            if (_distance_to_destination > _drift_dist_prev) {
-                _drift_rising_count++;
-            } else {
-                _drift_rising_count = 0;
-            }
-            if (_drift_rising_count >= 5) {
-                Vector3f vel_ned;
-                if (ahrs.get_velocity_NED(vel_ned)) {
-                    g2.motors.set_current_estimate_ne(Vector2f(vel_ned.x, vel_ned.y));
-                }
-            }
+        // current/wind drift-estimate sampling: only trust a sample once distance-to-
+        // destination has been consistently rising (i.e. the vehicle is being pushed
+        // outward, not still decelerating from its last approach) AND throttle output
+        // is effectively zero (pure coast, no thrust contribution to the motion)
+        if (_distance_to_destination > _drift_last_distance) {
+            _drift_rising_count++;
         } else {
             _drift_rising_count = 0;
         }
-        _drift_dist_prev = _distance_to_destination;
+        _drift_last_distance = _distance_to_destination;
+
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&
+            fabsf(g2.motors.get_throttle()) < LOITER_DRIFT_THR_PCT) {
+            Vector3f vel_ned;
+            if (ahrs.get_velocity_NED(vel_ned)) {
+                g2.motors.set_current_estimate_ne(Vector2f{vel_ned.x, vel_ned.y});
+            }
+        }
     } else {
         _drift_rising_count = 0;
         // P controller with hard-coded gain to convert distance to desired speed
