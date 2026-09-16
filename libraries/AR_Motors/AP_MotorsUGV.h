@@ -4,6 +4,7 @@
 #include <AP_WheelEncoder/AP_WheelRateControl.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AP_BattMonitor/AP_BattMonitor_config.h>
+#include <AP_Math/AP_Math.h>
 
 class AP_MotorsUGV {
 public:
@@ -92,6 +93,13 @@ public:
     // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)
     bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }
 
+    // set/get an externally-measured wind+current drift estimate (m/s, North/East).
+    // Intended to be fed by modes (e.g. Loiter) that can measure drift directly from
+    // ground velocity while coasting.  get_current_estimate_ne() returns false once
+    // the estimate is older than CUR_EST_TC seconds.
+    void set_current_estimate_ne(const Vector2f &current_ne);
+    bool get_current_estimate_ne(Vector2f &current_ne) const;
+
     // output to motors and steering servos
     // ground_speed should be the vehicle's speed over the surface in m/s
     // dt should be expected time between calls to this function
@@ -165,6 +173,10 @@ private:
     // output to regular steering and throttle channels
     void output_regular(bool armed, float ground_speed, float steering, float throttle, float dt);
 
+    // set the north/east current+wind drift estimate (m/s), e.g. sampled by Loiter mode while
+    // coasting.  Blended (not overwritten) internally, and faded out by age against CUR_EST_TC.
+    void set_current_estimate_ne(const Vector2f &cur_ne);
+
     // output to skid steering channels
     void output_skid_steering(bool armed, float steering, float throttle, float dt);
 
@@ -220,9 +232,12 @@ private:
     AP_Float _steering_throttle_mix; // Steering vs Throttle priorisation.  Higher numbers prioritise steering, lower numbers prioritise throttle.  Only valid for Skid Steering vehicles
     AP_Float _reverse_delay; // delay in seconds when reversing motor
     AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power
-    AP_Float _vec_blend_thr;     // filtered throttle (0~1) at/above which vectored-thrust steering uses pure atan/cos; below this it blends toward direct angle mapping.  zero disables blending (legacy atan behaviour)
-    AP_Float _vec_deadband;      // vector magnitude (steering_norm, filtered throttle) below which vectored-thrust steering angle is held at its last value
-    AP_Float _vec_resid_tc;      // time constant (seconds) of low-pass filter applied to throttle before use in vectored-thrust steering blend, to distinguish a sudden throttle step from steady cruising thrust
+    AP_Float _vec_deadband;    // deadband on total commanded steering/throttle vector magnitude below which the vectored-thrust angle is frozen instead of recalculated, suppressing atan() noise amplification near zero throttle
+    AP_Float _vec_blend_thr;   // filtered throttle (normalised 0~1) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle)
+    AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime
+    AP_Float _wind_comp_gain;  // gain applied to the current/wind drift compensation term blended into vectored-thrust steering/throttle.  zero to disable
+    AP_Float _cur_est_tc;      // time (s) over which a Loiter-sourced current/wind estimate's confidence decays to zero, at which point the AHRS wind estimate is used instead
+    AP_Float _cur_est_blend;   // low-pass blend weight (0~1) applied to each new Loiter-sourced current/wind sample, higher values track faster but are noisier
 
     // internal variables
     float   _steering;  // requested steering as a value from -4500 to +4500
@@ -232,6 +247,8 @@ private:
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
     float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend
     float   _vec_last_steering_angle_rad; // last commanded vectored-thrust steering angle (rad), held during deadband
+	Vector2f _current_estimate_ne;         // current/wind drift estimate (m/s, North/East), externally supplied (e.g. by Loiter mode)
+    uint32_t _current_estimate_ms;         // system time (ms) _current_estimate_ne was last updated; 0 if never set
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1
     float   _pitch;     // requested pitch as a value from -1 to +1
@@ -258,6 +275,9 @@ private:
         // output with delay for reversal
         void output(SRV_Channel::Function function, float throttle, float delay);
     } rev_delay_throttle, rev_delay_throttleLeft, rev_delay_throttleRight;
+
+    Vector2f _current_estimate_ne;  // last externally-measured wind+current drift vector, m/s North/East
+    uint32_t _current_estimate_ms;  // system time (ms) _current_estimate_ne was last updated, 0 = never
 
     static AP_MotorsUGV *_singleton;
 };

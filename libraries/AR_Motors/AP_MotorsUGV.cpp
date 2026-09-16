@@ -19,6 +19,7 @@
 #include <AP_Relay/AP_Relay.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
 #include <AP_Scheduler/AP_Scheduler.h>
+#include <AP_AHRS/AP_AHRS.h>
 
 #define SERVO_MAX 4500  // This value represents 45 degrees and is just an arbitrary representation of servo max travel.
 
@@ -139,27 +140,49 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     AP_GROUPINFO("BAT_WATT_TC", 16, AP_MotorsUGV, _batt_power_time_constant, 2.0f),
 #endif
 
-    // @Param: VEC_BLEND_THR
-    // @DisplayName: Vectored thrust low-speed blend throttle threshold
-    // @Description: Filtered throttle (0 to 1, normalised) at or above which vectored-thrust steering angle is computed with the standard atan(steering/throttle) formula. Below this value the steering angle progressively blends toward a direct steering-proportional angle to avoid the atan() instability as throttle approaches zero. Zero disables blending (legacy behaviour).
-    // @Range: 0.0 1.0
-    // @User: Advanced
-    AP_GROUPINFO("VEC_BLEND_THR", 17, AP_MotorsUGV, _vec_blend_thr, 0.3f),
-
     // @Param: VEC_DEADBAND
-    // @DisplayName: Vectored thrust command deadband
-    // @Description: Combined magnitude of normalised steering and filtered throttle demand below which the vectored-thrust steering angle is held at its last commanded value instead of being recalculated. Prevents steering micro-jitter when both steering and throttle demand are near zero.
+    // @DisplayName: Vectored thrust deadband
+    // @Description: Deadband on total commanded steering/throttle vector magnitude (normalised) below which the vectored-thrust angle is frozen instead of recalculated, to suppress atan() noise amplification near zero throttle
     // @Range: 0.0 0.2
     // @User: Advanced
-    AP_GROUPINFO("VEC_DEADBAND", 18, AP_MotorsUGV, _vec_deadband, 0.03f),
+    AP_GROUPINFO("VEC_DEADBAND", 17, AP_MotorsUGV, _vec_deadband, 0.03f),
+
+    // @Param: VEC_BLEND_THR
+    // @DisplayName: Vectored thrust blend throttle
+    // @Description: Filtered throttle (normalised) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle), blending smoothly into the full atan() behaviour by twice this value
+    // @Range: 0.0 1.0
+    // @User: Advanced
+    AP_GROUPINFO("VEC_BLEND_THR", 18, AP_MotorsUGV, _vec_blend_thr, 0.3f),
 
     // @Param: VEC_RESID_TC
     // @DisplayName: Vectored thrust throttle filter time constant
-    // @Description: Time constant of the low-pass filter applied to throttle before it is used in the vectored-thrust steering blend (see VEC_BLEND_THR). Distinguishes a sudden throttle step (no real thrust/water-speed yet) from steady cruising thrust. Zero disables filtering.
+    // @Description: Time constant of the low-pass filter applied to throttle before it selects/blends the vectored-thrust regime
     // @Units: s
     // @Range: 0.0 5.0
     // @User: Advanced
     AP_GROUPINFO("VEC_RESID_TC", 19, AP_MotorsUGV, _vec_resid_tc, 0.5f),
+
+    // @Param: VEC_WIND_COMP
+    // @DisplayName: Vectored thrust current/wind compensation gain
+    // @Description: Gain applied to the current/wind drift compensation term blended into vectored-thrust steering/throttle.  Zero disables compensation
+    // @Range: 0.0 2.0
+    // @User: Advanced
+    AP_GROUPINFO("VEC_WIND_COMP", 20, AP_MotorsUGV, _wind_comp_gain, 0.0f),
+
+    // @Param: CUR_EST_TC
+    // @DisplayName: Current estimate staleness time constant
+    // @Description: Time over which a Loiter-sourced current/wind estimate's confidence decays to zero with age, after which the AHRS wind estimate is used instead
+    // @Units: s
+    // @Range: 0 300
+    // @User: Advanced
+    AP_GROUPINFO("CUR_EST_TC", 21, AP_MotorsUGV, _cur_est_tc, 60.0f),
+
+    // @Param: CUR_EST_BLEND
+    // @DisplayName: Current estimate sample blend weight
+    // @Description: Low-pass blend weight applied to each new Loiter-sourced current/wind sample.  Higher values track changes faster but are noisier
+    // @Range: 0.05 1.0
+    // @User: Advanced
+    AP_GROUPINFO("CUR_EST_BLEND", 22, AP_MotorsUGV, _cur_est_blend, 0.3f),
 
     AP_GROUPEND
 };
@@ -169,6 +192,40 @@ AP_MotorsUGV::AP_MotorsUGV(AP_WheelRateControl& rate_controller) :
 {
     AP_Param::setup_object_defaults(this, var_info);
     _singleton = this;
+    _vec_throttle_filt = 0.0f;
+    _vec_last_steering_angle_rad = 0.0f;
+    _current_estimate_ne.zero();
+    _current_estimate_ms = 0;
+}
+
+// set the north/east current+wind drift estimate (m/s), e.g. sampled by Loiter mode while coasting.
+// blended (not overwritten) so noisy single samples don't dominate the estimate
+void AP_MotorsUGV::set_current_estimate_ne(const Vector2f &cur_ne)
+{
+    if (_current_estimate_ms == 0) {
+        // first ever sample, initialise directly
+        _current_estimate_ne = cur_ne;
+    } else {
+        const float blend = constrain_float(_cur_est_blend, 0.0f, 1.0f);
+        _current_estimate_ne = _current_estimate_ne * (1.0f - blend) + cur_ne * blend;
+    }
+    _current_estimate_ms = AP_HAL::millis();
+}
+
+
+// retrieve the drift estimate if it exists and is not stale.  returns false
+// (and leaves current_ne unchanged) if no estimate has ever been set, if
+// CUR_EST_TC is zero, or if the estimate is older than CUR_EST_TC seconds
+bool AP_MotorsUGV::get_current_estimate_ne(Vector2f &current_ne) const
+{
+    if ((_current_estimate_ms == 0) || !is_positive(_current_estimate_tc)) {
+        return false;
+    }
+    if ((AP_HAL::millis() - _current_estimate_ms) > uint32_t(_current_estimate_tc * 1000.0f)) {
+        return false;
+    }
+    current_ne = _current_estimate_ne;
+    return true;
 }
 
 void AP_MotorsUGV::init(uint8_t frtype)
@@ -764,55 +821,87 @@ void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering
                 const float throttle_norm = throttle * 0.01f;
                 const float vector_angle_max_rad = radians(constrain_float(_vector_angle_max, 0.0f, 90.0f));
 
-                // low-pass filter throttle to distinguish a sudden step from standstill
-                // from genuinely steady low-speed cruising
-                if (is_positive(_vec_resid_tc) && is_positive(dt)) {
+                // resolve a single current/wind compensation vector before
+                // doing anything else: prefer the loiter-sourced drift
+                // estimate (direct, boat-specific measurement) while it is
+                // fresh; fall back to/blend with the AHRS wind-triangle
+                // estimate otherwise. Both are NED-ish horizontal vectors
+                // in m/s; convert to body frame using current heading.
+                Vector2f current_est_ne = _current_estimate_ne;
+                const float loiter_age_s = (AP_HAL::millis() - _current_estimate_ms) * 0.001f;
+                float loiter_weight = 0.0f;
+                if (is_positive(_vec_cur_tc) && _current_estimate_ms != 0) {
+                    loiter_weight = expf(-loiter_age_s / _vec_cur_tc);
+                }
+                Vector3f wind_ne;
+                bool have_wind = false;
+                if (is_positive(_vec_wind_comp) && AP::ahrs().get_wind_estimation_enabled()) {
+                    have_wind = AP::ahrs().get_wind(wind_ne);
+                }
+                Vector2f blended_current_ne;
+                if (have_wind) {
+                    blended_current_ne = current_est_ne * loiter_weight + Vector2f{wind_ne.x, wind_ne.y} * (1.0f - loiter_weight);
+                } else {
+                    blended_current_ne = current_est_ne * loiter_weight;
+                }
+
+                // low-pass filter throttle to distinguish sudden step commands from
+                // steady-state near-zero throttle, where atan() amplifies noise
+                if (is_positive(_vec_resid_tc)) {
                     const float alpha = constrain_float(dt / (_vec_resid_tc + dt), 0.0f, 1.0f);
                     _vec_throttle_filt += (throttle_norm - _vec_throttle_filt) * alpha;
                 } else {
                     _vec_throttle_filt = throttle_norm;
                 }
 
-                // commanded vector magnitude, used for the low-command deadband
+                // steering can never be more than filtered-throttle * tan(_vector_angle_max)
+                const float steering_norm_lim = fabsf(_vec_throttle_filt * tanf(vector_angle_max_rad));
+                float atan_steering_norm = steering_norm;
+                if (fabsf(atan_steering_norm) > steering_norm_lim) {
+                    if (is_positive(atan_steering_norm)) {
+                        atan_steering_norm = steering_norm_lim;
+                    } else {
+                        atan_steering_norm = -steering_norm_lim;
+                    }
+                    limit.steer_right = true;
+                    limit.steer_left = true;
+                }
+
                 const float vec_mag = sqrtf(sq(steering_norm) + sq(throttle_norm));
 
+                float w = 1.0f;   // blend weight: 1 = pure direct/quadrant mapping, 0 = legacy full atan()
                 float steering_angle_rad;
-                // continuous blend weight: w=1 (pure direct/quadrant, no throttle boost) when
-                // throttle_filt is negligible or the whole command is inside the deadband,
-                // w=0 (pure legacy atan()/cos() behaviour) at |throttle_filt| >= _vec_blend_thr
-                // default to legacy atan()/cos() behaviour (w=0) when blend is disabled
-                float w = 0.0f;
 
-                if (fabsf(vec_mag) < _vec_deadband) {
+                if (vec_mag < _vec_deadband) {
                     // both steering and throttle demand are negligible: freeze angle to
                     // suppress jitter instead of letting atan() amplify noise
                     steering_angle_rad = _vec_last_steering_angle_rad;
-                    // w stays at its default of 0.0f: no throttle boost while frozen
                 } else {
                     // direct/quadrant-based angle: proportional to steering demand only,
-                    // sign-folded for reverse (throttle_filt < 0) so the thruster points
-                    // the correct physical way instead of atan()'s incorrect mirrored sign
+                    // sign-folded for reverse throttle so the thruster points the correct way
                     float direct_angle_rad = constrain_float(steering_norm, -1.0f, 1.0f) * vector_angle_max_rad;
                     if (is_negative(_vec_throttle_filt)) {
                         direct_angle_rad = -direct_angle_rad;
                     }
 
-                    // legacy atan() angle, only well-behaved away from throttle_filt==0
+                    // legacy atan()-based angle, guarded against divide-by-zero
                     float atan_angle_rad = 0.0f;
                     if (!is_zero(_vec_throttle_filt)) {
-                        atan_angle_rad = atanf(steering_norm / _vec_throttle_filt);
-                        atan_angle_rad = constrain_float(atan_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);
+                        atan_angle_rad = atanf(atan_steering_norm / _vec_throttle_filt);
                     }
 
+                    // blend weight from filtered throttle magnitude: w=1 near zero throttle
+                    // (direct mapping), w=0 at/above VEC_BLEND_THR (legacy atan() mapping)
                     if (is_positive(_vec_blend_thr)) {
                         w = 1.0f - constrain_float(fabsf(_vec_throttle_filt) / _vec_blend_thr, 0.0f, 1.0f);
+                    } else {
+                        w = 0.0f;
                     }
-                    // if _vec_blend_thr <= 0, w stays 0.0f -> pure legacy atan()/cos(), as documented
 
                     steering_angle_rad = w * direct_angle_rad + (1.0f - w) * atan_angle_rad;
-                    steering_angle_rad = constrain_float(steering_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);
 
-                    if (fabsf(steering_angle_rad) >= vector_angle_max_rad) {
+                    if (fabsf(steering_angle_rad) > vector_angle_max_rad) {
+                        steering_angle_rad = constrain_float(steering_angle_rad, -vector_angle_max_rad, vector_angle_max_rad);
                         limit.steer_right = true;
                         limit.steer_left = true;
                     }
@@ -824,8 +913,9 @@ void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering
                 steering = steering_angle_rad / vector_angle_max_rad * 4500.0f;
 
                 // scale up throttle to compensate for steering angle, blended by the same w
-                // computed above: w=1 -> no boost (scaler=1), w=0 -> full cos() boost,
-                // matching original behaviour
+                // computed above: w=1 -> no boost (no forward-thrust component to preserve
+                // when driven purely by a position/speed PID at near-zero throttle),
+                // w=0 -> full cos() boost, matching original legacy behaviour
                 const float throttle_scaler_inv = w + (1.0f - w) * cosf(steering_angle_rad);
                 if (!is_zero(throttle_scaler_inv)) {
                     throttle /= throttle_scaler_inv;
