@@ -184,8 +184,18 @@ protected:
     // calculates the amount of throttle that should be output based
     // on things like proximity to corners and current speed
     virtual void calc_throttle(float target_speed, bool avoidance_enabled);
-
-    // performs a controlled stop. returns true once vehicle has stopped
+    
+	// retrieve a current/wind drift estimate rotated into body frame (x=forward m/s, y=right m/s).  
+    // prefers the fresher Loiter-sourced estimate (g2.motors.get_current_estimate_ne()); falls  
+    // back to the AHRS wind estimate (AP::ahrs().get_wind()) if that is unavailable.  
+    // returns false if neither source has a valid estimate.  
+    bool get_drift_compensation_body(Vector2f &drift_body) const;  
+  
+    // apply drift compensation to a desired heading (centi-degrees) and speed (m/s).  
+    // desired_heading_cd/desired_speed are updated in place.  no-op if no drift estimate available.  
+    void apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const;
+    
+	// performs a controlled stop. returns true once vehicle has stopped
     bool stop_vehicle();
 
     // estimate maximum vehicle speed (in m/s)

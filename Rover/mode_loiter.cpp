@@ -16,8 +16,10 @@ bool ModeLoiter::_enter()
     _desired_yaw_cd = ahrs.yaw_sensor;
 
     // reset drift-estimate detection state so stale data from a previous
-    // loiter session doesn't leak into this one
-    _drift_last_distance = _distance_to_destination;
+    // loiter session doesn't leak into this one.  Compute distance fresh
+    // against the just-set _destination rather than reusing whatever the
+    // previous mode last left in _distance_to_destination.
+    _drift_last_distance = rover.current_loc.get_distance(_destination);
     _drift_rising_count = 0;
 
     return true;
@@ -73,6 +75,10 @@ void ModeLoiter::update()
             yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);
             _desired_speed = -_desired_speed;
         }
+
+        // compensate for current/wind drift while driving back to the loiter center
+        apply_drift_compensation(_desired_yaw_cd, _desired_speed);
+        yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);
 
         // reduce desired speed if yaw_error is large
         // 45deg of error reduces speed to 75%, 90deg of error reduces speed to 50%

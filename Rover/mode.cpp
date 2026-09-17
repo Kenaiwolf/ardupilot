@@ -404,17 +404,63 @@ float Mode::calc_speed_nudge(float target_speed, bool reversed)
         return target_speed;
     }
 
-    // return the larger of the pilot speed and the original target speed
-    if (reversed) {
-        return MIN(target_speed, pilot_speed);
-    } else {
-        return MAX(target_speed, pilot_speed);
-    }
+    // return the larger of the pilot speed and the original target speed  
+    if (reversed) {  
+        return MIN(target_speed, pilot_speed);  
+    } else {  
+        return MAX(target_speed, pilot_speed);  
+    }  
+}  
+ 
+// retrieve a current/wind drift estimate rotated into body frame (x=forward, y=right), m/s  
+bool Mode::get_drift_compensation_body(Vector2f &drift_body) const  
+{  
+    Vector2f drift_ne;  
+    bool have_estimate = g2.motors.get_current_estimate_ne(drift_ne);  
+  
+    if (!have_estimate) {  
+        return false;  
+    }  
+  
+    drift_body = AP::ahrs().body_to_vehicle2d(drift_ne);  
+    return true;  
 }
-
-// high level call to navigate to waypoint
-// uses wp_nav to calculate turn rate and speed to drive along the path from origin to destination
-// this function updates _distance_to_destination
+  
+// apply drift compensation to a desired heading (centi-degrees) and speed (m/s)  
+void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const  
+{  
+    Vector2f drift_body;  
+    if (!get_drift_compensation_body(drift_body)) {  
+        return;  
+    }  
+  
+    // scale the raw estimate by the user-adjustable gain before using it for anything  
+    const float gain = constrain_float(g2.motors.get_drift_comp_gain(), 0.0f, 2.0f);  
+    if (is_zero(gain)) {  
+        return;  
+    }  
+    drift_body *= gain;  
+  
+    // forward component: directly add/subtract from desired speed to hold ground speed  
+    desired_speed += drift_body.x;  
+  
+    // lateral component: crab-angle correction.  
+    // uses MAX(desired_speed, drift_body.length()) so that a tiny/zero desired_speed while  
+    // holding position against real current/wind actually commands enough forward speed  
+    // to have a chance of cancelling it, rather than just avoiding a divide-by-zero.  
+    // saturates (clips to +-90deg) if drift still exceeds the vehicle's achievable speed --  
+    // this means the vehicle physically cannot cancel the drift at the current speed target.  
+    const float speed_abs = MAX(fabsf(desired_speed), drift_body.length());  
+    {  
+        const float sin_theta = constrain_float(drift_body.y / speed_abs, -1.0f, 1.0f);  
+        const float crab_angle_cd = degrees(asinf(sin_theta)) * 100.0f;  
+        desired_heading_cd = wrap_360_cd(desired_heading_cd + crab_angle_cd);  
+    }  
+}  
+  
+// high level call to navigate to waypoint  
+// uses wp_nav to calculate turn rate and speed to drive along the path from origin to destination  
+// this function updates _distance_to_destination  
 void Mode::navigate_to_waypoint()
 {
     // apply speed nudge from pilot
@@ -436,32 +482,83 @@ void Mode::navigate_to_waypoint()
     }
 #endif
 
-    // pass desired speed to throttle controller
-    // do not do simple avoidance because this is already handled in the position controller
-    calc_throttle(g2.wp_nav.get_speed(), false);
-
-    float desired_heading_cd = g2.wp_nav.oa_wp_bearing_cd();
-    if (g2.sailboat.use_indirect_route(desired_heading_cd)) {
-        // sailboats use heading controller when tacking upwind
-        desired_heading_cd = g2.sailboat.calc_heading(desired_heading_cd);
-        // use pivot turn rate for tacks
-        const float turn_rate = g2.sailboat.tacking() ? g2.wp_nav.get_pivot_rate() : 0.0f;
-        calc_steering_to_heading(desired_heading_cd, turn_rate);
-    } else {
-        // retrieve turn rate from waypoint controller
-        float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();
-
-        // if simple avoidance is active at very low speed do not attempt to turn
-#if AP_AVOIDANCE_ENABLED
-        if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {
-            desired_turn_rate_rads = 0.0f;
-        }
-#endif
-
-        // call turn rate steering controller
-        calc_steering_from_turn_rate(desired_turn_rate_rads);
+    // pass desired speed to throttle controller, biased by any current/wind drift estimate  
+    // do not do simple avoidance because this is already handled in the position controller  
+    Vector2f drift_body;  
+    const bool have_drift = get_drift_compensation_body(drift_body);  
+    const float speed_bias = have_drift ? drift_body.x : 0.0f;  
+    calc_throttle(g2.wp_nav.get_speed() + speed_bias, false);  
+  
+    float desired_heading_cd = g2.wp_nav.oa_wp_bearing_cd();  
+    // apply heading (crab-angle) bias to counter lateral drift, using the  
+    // vehicle's own current commanded speed as the reference for how much  
+    // sideways authority is available. Saturates (silently clamped) if the  
+    // lateral drift component exceeds the vehicle's own speed.  
+    if (have_drift) {  
+        const float speed_for_crab = MAX(fabsf(g2.wp_nav.get_speed() + speed_bias), 0.1f);  
+        const float crab_bias_cd = degrees(asinf(constrain_float(drift_body.y / speed_for_crab, -1.0f, 1.0f))) * 100.0f;  
+        desired_heading_cd = wrap_360_cd(desired_heading_cd + crab_bias_cd);  
+    }  
+    if (have_drift) {  
+        // small-angle heading bias from lateral drift component (drift_body.y is body-frame right)  
+        const float speed_for_bias = MAX(fabsf(g2.wp_nav.get_speed()), 0.1f);  
+        desired_heading_cd = wrap_360_cd(desired_heading_cd + degrees(atan2f(drift_body.y, speed_for_bias)) * 100.0f);  
+    }  
+  
+   // true only when drift compensation can actually be contributing anything --  
+    // used to fully restore the original calc_steering_from_turn_rate() path when  
+    // DRIFT_COMP_GAIN==0, so the gain acts as a real kill-switch for on-water isolation testing  
+    const bool drift_comp_active = !is_zero(g2.motors.get_drift_comp_gain());  
+  
+   // true only when drift compensation can actually be contributing anything --  
+    // used to fully restore the original calc_steering_from_turn_rate() path when  
+    // DRIFT_COMP_GAIN==0, so the gain acts as a real kill-switch for on-water isolation testing  
+    const bool drift_comp_active = !is_zero(g2.motors.get_drift_comp_gain());  
+  
+    if (g2.sailboat.use_indirect_route(desired_heading_cd)) {  
+        // sailboats use heading controller when tacking upwind (unaffected by drift gain,  
+        // this path pre-dates the drift-compensation work)  
+        desired_heading_cd = g2.sailboat.calc_heading(desired_heading_cd);  
+        // use pivot turn rate for tacks  
+        const float turn_rate = g2.sailboat.tacking() ? g2.wp_nav.get_pivot_rate() : 0.0f;  
+        calc_steering_to_heading(desired_heading_cd, turn_rate);  
+    } else if (drift_comp_active) {  
+        // if simple avoidance is active at very low speed do not attempt to turn  
+#if AP_AVOIDANCE_ENABLED  
+        if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {  
+            calc_steering_from_turn_rate(0.0f);  
+        } else  
+#endif  
+        {  
+            // drive to the drift-corrected heading (includes crab-angle bias from  
+            // apply_drift_compensation()).  a rate-only controller cannot hold a  
+            // steady heading offset (it would integrate forever), so this must go  
+            // through the heading-closed-loop controller, not calc_steering_from_turn_rate().  
+            // wp_nav's own turn-rate solution is reused as the rate ceiling/feed-forward  
+            // so cornering aggressiveness stays close to stock behaviour.  
+            calc_steering_to_heading(desired_heading_cd, fabsf(degrees(g2.wp_nav.get_turn_rate_rads())));  
+        }  
+    } else {  
+        // DRIFT_COMP_GAIN == 0: exact original stock path, unmodified by any of this  
+        // session's work, for clean on-water A/B isolation testing  
+        float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();  
+#if AP_AVOIDANCE_ENABLED  
+        if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {  
+            desired_turn_rate_rads = 0.0f;  
+        }  
+#endif  
+        calc_steering_from_turn_rate(desired_turn_rate_rads);  
+    } else {  
+        // DRIFT_COMP_GAIN == 0: exact original stock path, unmodified by any of this  
+        // session's work, for clean on-water A/B isolation testing  
+        float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();  
+#if AP_AVOIDANCE_ENABLED  
+        if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {  
+            desired_turn_rate_rads = 0.0f;  
+        }  
+#endif  
+        calc_steering_from_turn_rate(desired_turn_rate_rads);  
     }
-}
 
 // calculate steering output given a turn rate
 // desired turn rate in radians/sec. Positive to the right.
