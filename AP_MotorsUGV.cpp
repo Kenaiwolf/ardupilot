@@ -433,11 +433,6 @@ void AP_MotorsUGV::output(bool armed, float ground_speed, float dt)
         _throttle = 0.0f;
     }
 
-    // inside AP_MotorsUGV::output(), once per loop:  
-	Vector3f wind;  
-	if (AP::ahrs().get_wind_estimation_enabled() && AP::ahrs().get_wind(wind)) {  
-		set_current_estimate_ne(Vector2f{wind.x, wind.y});  
-	}
 	// clear limit flags
     // output_ methods are responsible for setting them to true if required on each iteration
     limit.steer_left = limit.steer_right = limit.throttle_lower = limit.throttle_upper = false;
