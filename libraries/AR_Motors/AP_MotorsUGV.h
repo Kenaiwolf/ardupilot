@@ -244,7 +244,7 @@ private:
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
     float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend
     float   _vec_last_steering_angle_rad; // last commanded vectored-thrust steering angle (rad), held during deadband
-	Vector2f _current_estimate_ne;         // current/wind drift estimate (m/s, North/East), externally supplied (e.g. by Loiter mode)
+    Vector2f _current_estimate_ne;         // current/wind drift estimate (m/s, North/East), externally supplied (e.g. by Loiter mode)
     uint32_t _current_estimate_ms;         // system time (ms) _current_estimate_ne was last updated; 0 if never set
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1

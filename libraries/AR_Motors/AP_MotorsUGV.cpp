@@ -19,7 +19,6 @@
 #include <AP_Relay/AP_Relay.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
 #include <AP_Scheduler/AP_Scheduler.h>
-#include <AP_AHRS/AP_AHRS.h>
 
 #define SERVO_MAX 4500  // This value represents 45 degrees and is just an arbitrary representation of servo max travel.
 
