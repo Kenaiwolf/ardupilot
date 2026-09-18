@@ -98,7 +98,8 @@ public:
     // ground velocity while coasting.  get_current_estimate_ne() returns false once
     // the estimate is older than CUR_EST_TC seconds.
     void set_current_estimate_ne(const Vector2f &current_ne);
-    bool get_current_estimate_ne(Vector2f &current_ne) const;
+    bool get_current_estimate_ne(Vector2f &current_ne) const;  
+    float get_drift_comp_gain() const { return _drift_comp_gain; }
 
     // output to motors and steering servos
     // ground_speed should be the vehicle's speed over the surface in m/s
@@ -173,10 +174,6 @@ private:
     // output to regular steering and throttle channels
     void output_regular(bool armed, float ground_speed, float steering, float throttle, float dt);
 
-    // set the north/east current+wind drift estimate (m/s), e.g. sampled by Loiter mode while
-    // coasting.  Blended (not overwritten) internally, and faded out by age against CUR_EST_TC.
-    void set_current_estimate_ne(const Vector2f &cur_ne);
-
     // output to skid steering channels
     void output_skid_steering(bool armed, float steering, float throttle, float dt);
 
@@ -235,7 +232,7 @@ private:
     AP_Float _vec_deadband;    // deadband on total commanded steering/throttle vector magnitude below which the vectored-thrust angle is frozen instead of recalculated, suppressing atan() noise amplification near zero throttle
     AP_Float _vec_blend_thr;   // filtered throttle (normalised 0~1) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle)
     AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime
-    AP_Float _wind_comp_gain;  // gain applied to the current/wind drift compensation term blended into vectored-thrust steering/throttle.  zero to disable
+    AP_Float _drift_comp_gain;  // gain applied to the current/wind drift-compensation estimate before it is used by Mode::apply_drift_compensation().  zero to disable
     AP_Float _cur_est_tc;      // time (s) over which a Loiter-sourced current/wind estimate's confidence decays to zero, at which point the AHRS wind estimate is used instead
     AP_Float _cur_est_blend;   // low-pass blend weight (0~1) applied to each new Loiter-sourced current/wind sample, higher values track faster but are noisier
 
@@ -275,9 +272,6 @@ private:
         // output with delay for reversal
         void output(SRV_Channel::Function function, float throttle, float delay);
     } rev_delay_throttle, rev_delay_throttleLeft, rev_delay_throttleRight;
-
-    Vector2f _current_estimate_ne;  // last externally-measured wind+current drift vector, m/s North/East
-    uint32_t _current_estimate_ms;  // system time (ms) _current_estimate_ne was last updated, 0 = never
 
     static AP_MotorsUGV *_singleton;
 };

@@ -162,12 +162,12 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("VEC_RESID_TC", 19, AP_MotorsUGV, _vec_resid_tc, 0.5f),
 
-    // @Param: VEC_WIND_COMP
-    // @DisplayName: Vectored thrust current/wind compensation gain
-    // @Description: Gain applied to the current/wind drift compensation term blended into vectored-thrust steering/throttle.  Zero disables compensation
-    // @Range: 0.0 2.0
-    // @User: Advanced
-    AP_GROUPINFO("VEC_WIND_COMP", 20, AP_MotorsUGV, _wind_comp_gain, 0.0f),
+    // @Param: DRIFT_COMP_GAIN  
+    // @DisplayName: Current/wind drift compensation gain  
+    // @Description: Scaling gain applied to the current/wind drift estimate before it biases desired speed and heading in Mode::apply_drift_compensation().  1.0 = apply the full estimated drift, 0.0 disables compensation  
+    // @Range: 0.0 2.0  
+    // @User: Advanced  
+    AP_GROUPINFO("DRIFT_COMP_GAIN", 20, AP_MotorsUGV, _drift_comp_gain, 0.0f),
 
     // @Param: CUR_EST_TC
     // @DisplayName: Current estimate staleness time constant
@@ -177,11 +177,12 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("CUR_EST_TC", 21, AP_MotorsUGV, _cur_est_tc, 60.0f),
 
-    // @Param: CUR_EST_BLEND
-    // @DisplayName: Current estimate sample blend weight
-    // @Description: Low-pass blend weight applied to each new Loiter-sourced current/wind sample.  Higher values track changes faster but are noisier
-    // @Range: 0.05 1.0
-    // @User: Advanced
+    // @Param: CUR_EST_BLEND  
+    // @DisplayName: Current estimate low-pass time constant  
+    // @Description: Time constant used to low-pass filter each new Loiter-sourced current/wind drift sample.  Lower values track changes faster but are noisier  
+    // @Range: 0.05 10.0  
+    // @Units: s  
+    // @User: Advanced  
     AP_GROUPINFO("CUR_EST_BLEND", 22, AP_MotorsUGV, _cur_est_blend, 0.3f),
 
     AP_GROUPEND
@@ -200,16 +201,30 @@ AP_MotorsUGV::AP_MotorsUGV(AP_WheelRateControl& rate_controller) :
 
 // set the north/east current+wind drift estimate (m/s), e.g. sampled by Loiter mode while coasting.
 // blended (not overwritten) so noisy single samples don't dominate the estimate
-void AP_MotorsUGV::set_current_estimate_ne(const Vector2f &cur_ne)
-{
-    if (_current_estimate_ms == 0) {
-        // first ever sample, initialise directly
-        _current_estimate_ne = cur_ne;
-    } else {
-        const float blend = constrain_float(_cur_est_blend, 0.0f, 1.0f);
-        _current_estimate_ne = _current_estimate_ne * (1.0f - blend) + cur_ne * blend;
-    }
-    _current_estimate_ms = AP_HAL::millis();
+void AP_MotorsUGV::set_current_estimate_ne(const Vector2f &cur_ne)  
+{  
+    const uint32_t now_ms = AP_HAL::millis();  
+  
+    // treat a first-ever sample, or one arriving after the previous estimate  
+    // has already gone stale (per CUR_EST_TC), as a fresh start rather than  
+    // blending against an outdated value  
+    const bool previous_valid = (_current_estimate_ms != 0) &&  
+                                 is_positive(_cur_est_tc) &&  
+                                 ((now_ms - _current_estimate_ms) <= uint32_t(_cur_est_tc * 1000.0f));  
+  
+    if (!previous_valid) {  
+        _current_estimate_ne = cur_ne;  
+    } else {  
+        // CUR_EST_BLEND is treated as a time constant (seconds), not a fixed  
+        // per-call weight, so the blend rate no longer depends on how often  
+        // this function happens to be called (e.g. once per qualifying tick  
+        // vs. once per coast phase)  
+        const float dt = (now_ms - _current_estimate_ms) * 0.001f;  
+        const float alpha = is_positive(_cur_est_blend) ? constrain_float(dt / (_cur_est_blend + dt), 0.0f, 1.0f) : 1.0f;  
+        _current_estimate_ne = _current_estimate_ne * (1.0f - alpha) + cur_ne * alpha;  
+    }  
+  
+    _current_estimate_ms = now_ms;  
 }
 
 
@@ -218,10 +233,10 @@ void AP_MotorsUGV::set_current_estimate_ne(const Vector2f &cur_ne)
 // CUR_EST_TC is zero, or if the estimate is older than CUR_EST_TC seconds
 bool AP_MotorsUGV::get_current_estimate_ne(Vector2f &current_ne) const
 {
-    if ((_current_estimate_ms == 0) || !is_positive(_current_estimate_tc)) {
+    if ((_current_estimate_ms == 0) || !is_positive(_cur_est_tc)) {
         return false;
     }
-    if ((AP_HAL::millis() - _current_estimate_ms) > uint32_t(_current_estimate_tc * 1000.0f)) {
+    if ((AP_HAL::millis() - _current_estimate_ms) > uint32_t(_cur_est_tc * 1000.0f)) {
         return false;
     }
     current_ne = _current_estimate_ne;
@@ -418,7 +433,7 @@ void AP_MotorsUGV::output(bool armed, float ground_speed, float dt)
         _throttle = 0.0f;
     }
 
-    // clear limit flags
+	// clear limit flags
     // output_ methods are responsible for setting them to true if required on each iteration
     limit.steer_left = limit.steer_right = limit.throttle_lower = limit.throttle_upper = false;
 
@@ -819,32 +834,8 @@ void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering
                 // normalise desired steering and throttle to ease calculations
                 const float steering_norm = steering / 4500.0f;
                 const float throttle_norm = throttle * 0.01f;
-                const float vector_angle_max_rad = radians(constrain_float(_vector_angle_max, 0.0f, 90.0f));
-
-                // resolve a single current/wind compensation vector before
-                // doing anything else: prefer the loiter-sourced drift
-                // estimate (direct, boat-specific measurement) while it is
-                // fresh; fall back to/blend with the AHRS wind-triangle
-                // estimate otherwise. Both are NED-ish horizontal vectors
-                // in m/s; convert to body frame using current heading.
-                Vector2f current_est_ne = _current_estimate_ne;
-                const float loiter_age_s = (AP_HAL::millis() - _current_estimate_ms) * 0.001f;
-                float loiter_weight = 0.0f;
-                if (is_positive(_vec_cur_tc) && _current_estimate_ms != 0) {
-                    loiter_weight = expf(-loiter_age_s / _vec_cur_tc);
-                }
-                Vector3f wind_ne;
-                bool have_wind = false;
-                if (is_positive(_vec_wind_comp) && AP::ahrs().get_wind_estimation_enabled()) {
-                    have_wind = AP::ahrs().get_wind(wind_ne);
-                }
-                Vector2f blended_current_ne;
-                if (have_wind) {
-                    blended_current_ne = current_est_ne * loiter_weight + Vector2f{wind_ne.x, wind_ne.y} * (1.0f - loiter_weight);
-                } else {
-                    blended_current_ne = current_est_ne * loiter_weight;
-                }
-
+                const float vector_angle_max_rad = radians(constrain_float(_vector_angle_max, 0.0f, 90.0f));  
+  
                 // low-pass filter throttle to distinguish sudden step commands from
                 // steady-state near-zero throttle, where atan() amplifies noise
                 if (is_positive(_vec_resid_tc)) {
@@ -879,16 +870,21 @@ void AP_MotorsUGV::output_regular(bool armed, float ground_speed, float steering
                 } else {
                     // direct/quadrant-based angle: proportional to steering demand only,
                     // sign-folded for reverse throttle so the thruster points the correct way
-                    float direct_angle_rad = constrain_float(steering_norm, -1.0f, 1.0f) * vector_angle_max_rad;
-                    if (is_negative(_vec_throttle_filt)) {
-                        direct_angle_rad = -direct_angle_rad;
-                    }
+					float direct_angle_rad = constrain_float(steering_norm, -1.0f, 1.0f) * vector_angle_max_rad;  
+					// use the raw (unfiltered) throttle sign so the vector flips at the same instant  
+					// the actual commanded throttle crosses zero, not delayed by the low-pass filter  
+					if (is_negative(throttle_norm)) {  
+					direct_angle_rad = -direct_angle_rad;  
+					}
 
                     // legacy atan()-based angle, guarded against divide-by-zero
-                    float atan_angle_rad = 0.0f;
-                    if (!is_zero(_vec_throttle_filt)) {
-                        atan_angle_rad = atanf(atan_steering_norm / _vec_throttle_filt);
-                    }
+					float atan_angle_rad = 0.0f;  
+					if (!is_zero(_vec_throttle_filt)) {  
+						// magnitude from the filtered throttle (noise suppression), but sign forced  
+						// to match the raw/unfiltered throttle so reversal timing isn't lagged  
+						const float atan_denom = is_negative(throttle_norm) ? -fabsf(_vec_throttle_filt) : fabsf(_vec_throttle_filt);  
+						atan_angle_rad = atanf(atan_steering_norm / atan_denom);  
+					}
 
                     // blend weight from filtered throttle magnitude: w=1 near zero throttle
                     // (direct mapping), w=0 at/above VEC_BLEND_THR (legacy atan() mapping)
