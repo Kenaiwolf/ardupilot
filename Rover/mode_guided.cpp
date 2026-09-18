@@ -56,12 +56,17 @@ void ModeGuided::update()
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "target not received last %.1f secs, stopping", get_timeout_ms()/1000.0f);
                 have_attitude_target = false;
             }
-            if (have_attitude_target) {  
-                // apply drift compensation to heading before running steering controller  
-                apply_drift_compensation(_desired_yaw_cd, _desired_speed);  
+             if (have_attitude_target) {  
+                // apply drift compensation to a local copy of the heading only -  
+                // _desired_yaw_cd must stay clean (it is the persistent commanded  
+                // target, re-read every tick), otherwise the crab-angle correction  
+                // would compound cycle-over-cycle since apply_drift_compensation()  
+                // writes its result back into whatever variable is passed in  
+                float corrected_heading_cd = _desired_yaw_cd;  
+                apply_drift_compensation(corrected_heading_cd, _desired_speed);  
   
                 // run steering and throttle controllers  
-                calc_steering_to_heading(_desired_yaw_cd);  
+                calc_steering_to_heading(corrected_heading_cd);  
                 calc_throttle(calc_speed_nudge(_desired_speed, is_negative(_desired_speed)), true);  
             } else {
                 // we have reached the destination so stay here

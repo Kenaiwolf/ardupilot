@@ -329,7 +329,11 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     // never to target_speed, so it doesn't shift the PID's ground-speed setpoint
     Vector2f drift_body;  
     if (get_drift_compensation_body(drift_body)) {  
-        throttle_out += (drift_body.x * g.throttle_cruise / MAX(g.speed_cruise, 0.1f)) * constrain_float(g2.motors.get_drift_comp_gain(), 0.0f, 2.0f);  
+        const float expo = attitude_control.get_speed_thr_expo();  
+        const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
+        const float speed_ratio = fabsf(target_speed) / cruise_speed;  
+        const float local_slope = (g.throttle_cruise * expo / cruise_speed) * powf(MAX(speed_ratio, 0.01f), expo - 1.0f);  
+        throttle_out += (drift_body.x * local_slope) * constrain_float(g2.motors.get_drift_comp_gain(), 0.0f, 2.0f);  
     }
 
     // send to motor  
@@ -427,7 +431,7 @@ bool Mode::get_drift_compensation_body(Vector2f &drift_body) const
     if (!have_estimate) {
         return false;
     }
-    drift_body = AP::ahrs().body_to_vehicle2d(drift_ne);
+    drift_body = AP::ahrs().earth_to_body2D(drift_ne);
     return true;
 }
 
