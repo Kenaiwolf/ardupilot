@@ -56,10 +56,13 @@ void ModeGuided::update()
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "target not received last %.1f secs, stopping", get_timeout_ms()/1000.0f);
                 have_attitude_target = false;
             }
-            if (have_attitude_target) {
-                // run steering and throttle controllers
-                calc_steering_to_heading(_desired_yaw_cd);
-                calc_throttle(calc_speed_nudge(_desired_speed, is_negative(_desired_speed)), true);
+            if (have_attitude_target) {  
+                // apply drift compensation to heading before running steering controller  
+                apply_drift_compensation(_desired_yaw_cd, _desired_speed);  
+  
+                // run steering and throttle controllers  
+                calc_steering_to_heading(_desired_yaw_cd);  
+                calc_throttle(calc_speed_nudge(_desired_speed, is_negative(_desired_speed)), true);  
             } else {
                 // we have reached the destination so stay here
                 if (rover.is_boat()) {
