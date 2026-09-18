@@ -565,15 +565,23 @@ const AP_Param::GroupInfo AR_AttitudeControl::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("_BAL_LIM_THR", 15, AR_AttitudeControl, _pitch_limit_throttle_thresh, AR_ATTCONTROL_PITCH_LIM_THR_THRESH),
 
-    // @Param: _STR_DEC_MAX
-    // @DisplayName: Steering control angular deceleration maximum
-    // @Description: Steering control angular deceleration maximum (in deg/s/s).  0 to disable deceleration limiting
-    // @Range: 0 1000
-    // @Increment: 0.1
-    // @Units: deg/s/s
-    // @User: Standard
-    AP_GROUPINFO("_STR_DEC_MAX", 16, AR_AttitudeControl, _steer_decel_max, AR_ATTCONTROL_STEER_DECEL_MAX),
-
+    // @Param: _STR_DEC_MAX  
+    // @DisplayName: Steering control angular deceleration maximum  
+    // @Description: Steering control angular deceleration maximum (in deg/s/s).  0 to disable deceleration limiting  
+    // @Range: 0 1000  
+    // @Increment: 0.1  
+    // @Units: deg/s/s  
+    // @User: Standard  
+    AP_GROUPINFO("_STR_DEC_MAX", 16, AR_AttitudeControl, _steer_decel_max, AR_ATTCONTROL_STEER_DECEL_MAX),  
+  
+    // @Param: _SPD_EXPO  
+    // @DisplayName: Speed to throttle curve exponent  
+    // @Description: Exponent applied to the normalised speed/cruise_speed ratio when calculating feed-forward throttle. 1.0 gives the original linear behaviour. Values above 1.0 make the curve concave, appropriate for boats where drag increases faster than linearly with speed.  
+    // @Range: 0.5 3.0  
+    // @Increment: 0.1  
+    // @User: Advanced  
+    AP_GROUPINFO("_SPD_EXPO", 17, AR_AttitudeControl, _speed_thr_expo, 1.0f),  
+  
     AP_GROUPEND
 };
 
@@ -787,10 +795,15 @@ float AR_AttitudeControl::get_throttle_out_speed(float desired_speed, bool motor
     // acceleration limit desired speed
     _desired_speed = get_desired_speed_accel_limited(desired_speed, dt);
 
-    // calculate base throttle (protect against divide by zero)
-    float throttle_base = 0.0f;
-    if (is_positive(cruise_speed) && is_positive(cruise_throttle)) {
-        throttle_base = _desired_speed * (cruise_throttle / cruise_speed);
+    // calculate base throttle (protect against divide by zero)  
+    float throttle_base = 0.0f;  
+    if (is_positive(cruise_speed) && is_positive(cruise_throttle)) {  
+        const float speed_ratio = fabsf(_desired_speed) / cruise_speed;  
+        const float expo = (_speed_thr_expo > 0.0f) ? _speed_thr_expo : 1.0f;  
+        throttle_base = cruise_throttle * powf(speed_ratio, expo);  
+        if (is_negative(_desired_speed)) {  
+            throttle_base = -throttle_base;  
+        }  
     }
 
     // calculate final output
