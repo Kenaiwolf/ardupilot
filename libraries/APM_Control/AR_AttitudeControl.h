@@ -74,9 +74,12 @@ public:
     //   cruise speed should be in m/s, cruise throttle should be a number from -1 to +1
     float get_throttle_out_speed(float desired_speed, bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt);
 
-    // return a throttle output from -1 to +1 to perform a controlled stop.  stopped is set to true once stop has been completed
-    float get_throttle_out_stop(bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt, bool &stopped);
-
+    // return a throttle output from -1 to +1 to perform a controlled stop.  stopped is set to true once stop has been completed  
+    float get_throttle_out_stop(bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt, bool &stopped);  
+  
+    // get speed->throttle curve exponent (see _speed_thr_expo).  1.0 = linear  
+    float get_speed_thr_expo() const { return is_positive(_speed_thr_expo) ? _speed_thr_expo.get() : 1.0f; }  
+  
     // balancebot pitch to throttle controller
     // returns a throttle output from -1 to +1 given a desired pitch angle (in radians)
     // pitch_max should be the user defined max pitch angle (in radians)
@@ -114,6 +117,9 @@ public:
 
     // get throttle/speed controller maximum deceleration
     float get_decel_max() const;
+	
+	// return the speed/throttle curve exponent (1.0 = linear, matches stock behaviour)  
+    float get_speed_thr_expo() const { return (_speed_thr_expo > 0.0f) ? _speed_thr_expo : 1.0f; }
 
     // check if speed controller active
     bool speed_control_active() const;
