@@ -19,10 +19,33 @@ bool ModeLoiter::_enter()
     // loiter session doesn't leak into this one.  Compute distance fresh
     // against the just-set _destination rather than reusing whatever the
     // previous mode last left in _distance_to_destination.
-    _drift_last_distance = rover.current_loc.get_distance(_destination);
-    _drift_rising_count = 0;
-
-    return true;
+    _drift_last_distance = rover.current_loc.get_distance(_destination);  
+    _drift_rising_count = 0;  
+  
+    // handoff: seed our own loiter-sourced drift estimate from whatever  
+    // Guided last measured, weighted down by how long ago it was written.  
+    // mirrors ModeGuided::_enter()'s equivalent seed from Loiter.  
+    // minimum age (ms) a source estimate must have before we trust it as a genuine  
+    // independent measurement rather than a same-tick echo written by the other  
+    // mode's own _enter() re-entering back into us during this same call chain.  
+    // mirrors ModeGuided::_enter()'s equivalent guard.  order-independent.  
+  
+    Vector2f nav_ne;    
+    uint32_t nav_age_ms = 0;    
+    bool nav_is_seeded = false;  
+    if (g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
+        !nav_is_seeded && (nav_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
+        (nav_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
+        const float age_s = nav_age_ms * 0.001f;    
+        const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
+        const float seed_weight = constrain_float(1.0f - (age_s / max_age_s), 0.0f, 1.0f);    
+        // nav_ne already has DRIFT_GAIN_NAV baked in - seed raw, do not    
+        // pass through set_loiter_estimate_ne() or DRIFT_GAIN_LOIT would be    
+        // applied on top of Guided's own gain    
+        g2.motors.seed_loiter_estimate_ne(nav_ne * seed_weight, AP_HAL::millis() - nav_age_ms);    
+    }
+  
+    return true;  
 }
 
 void ModeLoiter::update()  
@@ -67,17 +90,18 @@ void ModeLoiter::update()
                 // contains the effect of our own compensation. Add that contribution  
                 // back so the stored estimate reflects true environmental drift,  
                 // not "drift minus our own push".  
-                Vector2f prev_estimate_ne;  
-                if (g2.motors.get_current_estimate_ne(prev_estimate_ne)) {  
-                    const float gain = constrain_float(g2.motors.get_drift_comp_gain(), 0.0f, 2.0f);  
-                    if (!is_zero(gain)) {  
-                        const Vector2f prev_estimate_body = ahrs.earth_to_body2D(prev_estimate_ne);  
-                        const Vector2f ff_body{prev_estimate_body.x * gain, 0.0f};  
-                        sample_ne += ahrs.body_to_earth2D(ff_body);  
-                    }  
-                }  
-  
-                g2.motors.set_current_estimate_ne(sample_ne);  
+                Vector2f prev_estimate_ne;    
+                if (g2.motors.get_current_estimate_ne(prev_estimate_ne)) {    
+                    // prev_estimate_ne is already the final, gain-applied vector that  
+                    // Mode::calc_throttle() actually fed into its forward feed-forward  
+                    // term (gain is now baked in at write-time, not read-time), so add  
+                    // it back directly without a second gain multiply.  
+                    const Vector2f prev_estimate_body = ahrs.earth_to_body2D(prev_estimate_ne);    
+                    const Vector2f ff_body{prev_estimate_body.x, 0.0f};    
+                    sample_ne += ahrs.body_to_earth2D(ff_body);    
+                }    
+    
+                g2.motors.set_loiter_estimate_ne(sample_ne); 
             }  
         }  
     } else {  

@@ -1,8 +1,9 @@
 #include "Rover.h"
 
-bool ModeGuided::_enter()
-{
-    // initialise submode to stop or loiter
+bool ModeGuided::_enter()  
+{  
+  
+    // initialise submode to stop or loiter  
     if (rover.is_boat()) {
         if (!start_loiter()) {
             start_stop();
@@ -56,7 +57,12 @@ void ModeGuided::update()
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "target not received last %.1f secs, stopping", get_timeout_ms()/1000.0f);
                 have_attitude_target = false;
             }
-             if (have_attitude_target) {  
+            if (have_attitude_target) {  
+                // feed the estimator with the *uncompensated* commanded vector -  
+                // using corrected_heading_cd here would subtract our own correction  
+                // out of the measured drift, systematically under-estimating it - added  
+                update_drift_estimator(_desired_yaw_cd, _desired_speed);  
+  
                 // apply drift compensation to a local copy of the heading only -  
                 // _desired_yaw_cd must stay clean (it is the persistent commanded  
                 // target, re-read every tick), otherwise the crab-angle correction  
@@ -139,14 +145,14 @@ void ModeGuided::update()
             break;
         }
 
-        case SubMode::Stop:
-            stop_vehicle();
-            break;
-
-        default:
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Unknown GUIDED mode");
-            break;
-    }
+        case SubMode::Stop:  
+            stop_vehicle();  
+            break;  
+  
+        default:  
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Unknown GUIDED mode");  
+            break;  
+    }  
 }
 
 // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
