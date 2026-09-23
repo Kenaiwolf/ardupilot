@@ -186,16 +186,28 @@ protected:
     virtual void calc_throttle(float target_speed, bool avoidance_enabled);
     
 	// retrieve a current/wind drift estimate rotated into body frame (x=forward m/s, y=right m/s).  
-    // prefers the fresher Loiter-sourced estimate (g2.motors.get_current_estimate_ne()); falls  
-    // back to the AHRS wind estimate (AP::ahrs().get_wind()) if that is unavailable.  
     // returns false if neither source has a valid estimate.  
     bool get_drift_compensation_body(Vector2f &drift_body) const;  
   
     // apply drift compensation to a desired heading (centi-degrees) and speed (m/s).  
     // desired_heading_cd/desired_speed are updated in place.  no-op if no drift estimate available.  
-    void apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const;
-    
-	// performs a controlled stop. returns true once vehicle has stopped
+    void apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const;  
+  
+    // drift estimator shared by all modes via navigate_to_waypoint() and Guided  
+    static constexpr float DRIFT_EST_WINDOW_S = 20.0f;           // window length (s)  
+    static constexpr float DRIFT_EST_MAX_YAW_RATE_DPS = 5.0f;  
+    static constexpr uint32_t DRIFT_EST_MAX_GAP_MS = 200; // max tick gap before window is stale  
+    static constexpr uint32_t DRIFT_SEED_MIN_AGE_MS = 50; // min age (ms) a source estimate must have before it can be used to seed another mode's estimate
+    static constexpr float DRIFT_EST_DISAGREE_GATE_MPS = 0.75f;  // max accepted sample jump (m/s)  
+    void update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms);  
+    Vector2f _drift_est_predicted_disp_ne_m;   // predicted NE displacement since window start (m)  
+    Vector2p _drift_est_actual_pos_start_ne_m; // actual NE position at window start (m)  
+    uint32_t _drift_est_window_start_ms;       // window start time (0 = no window active)  
+    uint32_t _drift_est_last_update_ms;        // last integrator update time  
+    bool     _drift_est_window_valid;    // false if any gate failed during current window  
+    uint16_t _drift_est_ekf_reset_count; // EKF NE-reset count at window start
+  
+    // performs a controlled stop. returns true once vehicle has stopped  
     bool stop_vehicle();
 
     // estimate maximum vehicle speed (in m/s)
@@ -632,7 +644,7 @@ protected:
         float horiz_max;    // horizontal position limit in meters from where guided mode was initiated (0 = no limit)
         uint32_t start_time_ms; // system time in milliseconds that control was handed to the external computer
         Location start_loc; // starting location for checking horiz_max limit
-    } limit;
+    } limit;  
 };
 
 
