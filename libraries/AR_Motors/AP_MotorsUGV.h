@@ -93,13 +93,39 @@ public:
     // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)
     bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }
 
-    // set/get an externally-measured wind+current drift estimate (m/s, North/East).
-    // Intended to be fed by modes (e.g. Loiter) that can measure drift directly from
-    // ground velocity while coasting.  get_current_estimate_ne() returns false once
-    // the estimate is older than CUR_EST_TC seconds.
-    void set_current_estimate_ne(const Vector2f &current_ne);
-    bool get_current_estimate_ne(Vector2f &current_ne) const;  
-    float get_drift_comp_gain() const { return _drift_comp_gain; }
+    // set an externally-measured wind+current drift estimate (m/s, North/East), one
+    // independent slot per acquisition method.  the per-source gain (DRIFT_GAIN_LOIT /
+    // DRIFT_GAIN_NAV) is applied here, at write-time, so the value returned by
+    // get_current_estimate_ne() below is already the final, PID-ready corrected vector --
+    // Mode::apply_drift_compensation()/calc_throttle() must NOT apply any further gain to it.
+    void set_loiter_estimate_ne(const Vector2f &drift_ne);
+    void set_nav_estimate_ne(const Vector2f &drift_ne);
+
+    // seed the opposite-mode slot directly with an already-calibrated value
+    // (e.g. handoff at mode entry) - unlike set_loiter/nav_estimate_ne(),
+    // these do NOT apply DRIFT_GAIN_LOIT/DRIFT_GAIN_NAV, because the value
+    // passed in has already had the *source* mode's gain applied and must
+    // not be double-scaled by the *destination* mode's own gain.
+    void seed_loiter_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms);
+    void seed_nav_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms);
+    bool is_loiter_estimate_seeded() const { return _loiter_estimate_is_seeded; }
+    bool is_nav_estimate_seeded() const { return _nav_estimate_is_seeded; }
+
+    // returns the more recently-updated of the two per-source estimates (gain already
+    // applied).  returns false if both sources are older than DRIFT_MAXAGE seconds
+    // (shared staleness cutoff -- e.g. 1800s/30min -- past which correction is treated
+    // as fully decayed / "wind stopped", not just faded).
+    bool get_current_estimate_ne(Vector2f &current_ne) const;
+
+    // used at mode-entry handoff time: lets the mode being entered seed its own estimate
+    // from the other source's still-fresh (already gain-corrected) value instead of
+    // starting cold at zero.  age_ms is time since that source last wrote a sample.
+    bool get_loiter_estimate_ne(Vector2f &drift_ne, uint32_t &age_ms, bool &is_seeded) const;
+    bool get_nav_estimate_ne(Vector2f &drift_ne, uint32_t &age_ms, bool &is_seeded) const;
+
+    // shared staleness cutoff (s) common to both sources - exposed so mode
+    // code can compute its own age-based handoff weighting
+    float get_drift_max_age_s() const { return _drift_max_age_s; }
 
     // output to motors and steering servos
     // ground_speed should be the vehicle's speed over the surface in m/s
@@ -232,9 +258,9 @@ private:
     AP_Float _vec_deadband;    // deadband on total commanded steering/throttle vector magnitude below which the vectored-thrust angle is frozen instead of recalculated, suppressing atan() noise amplification near zero throttle
     AP_Float _vec_blend_thr;   // filtered throttle (normalised 0~1) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle)
     AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime
-    AP_Float _drift_comp_gain;  // gain applied to the current/wind drift-compensation estimate before it is used by Mode::apply_drift_compensation().  zero to disable
-    AP_Float _cur_est_tc;      // time (s) over which a Loiter-sourced current/wind estimate's confidence decays to zero, at which point the AHRS wind estimate is used instead
-    AP_Float _cur_est_blend;   // low-pass blend weight (0~1) applied to each new Loiter-sourced current/wind sample, higher values track faster but are noisier
+    AP_Float _drift_comp_gain_loiter;  // gain applied to a Loiter-sourced drift sample at the moment it is written via set_loiter_estimate_ne().  zero to disable that source entirely
+    AP_Float _drift_comp_gain_nav;  // gain applied to nav-sourced drift sample at write-time via set_nav_estimate_ne(). zero disables this source
+    AP_Float _drift_max_age_s;   // shared staleness cutoff (s) common to both sources: if neither has been updated within this many seconds, get_current_estimate_ne() returns false (correction fully off).  e.g. 1800 = 30min
 
     // internal variables
     float   _steering;  // requested steering as a value from -4500 to +4500
@@ -243,9 +269,15 @@ private:
     float   _throttle_limit = 1.0f;  // used for current limiting
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
     float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend
+	float   _vec_steering_filt;   // low-pass filtered steering_norm, same time constant as _vec_throttle_filt
     float   _vec_last_steering_angle_rad; // last commanded vectored-thrust steering angle (rad), held during deadband
-    Vector2f _current_estimate_ne;         // current/wind drift estimate (m/s, North/East), externally supplied (e.g. by Loiter mode)
-    uint32_t _current_estimate_ms;         // system time (ms) _current_estimate_ne was last updated; 0 if never set
+    float   _vec_last_w;                  // last blend weight (w), held during deadband so throttle boost stays consistent
+    Vector2f _loiter_estimate_ne;           // Loiter-sourced drift estimate (m/s NE), gain applied
+    uint32_t _loiter_estimate_ms;           // ms _loiter_estimate_ne last updated; 0=never
+    Vector2f _nav_estimate_ne;           // Guided-sourced drift estimate (m/s, NE), gain applied
+    uint32_t _nav_estimate_ms;           // system time (ms) _nav_estimate_ne was last updated; 0 if never set
+    bool _loiter_estimate_is_seeded;  // true if current value came from a seed, not a real sample
+    bool _nav_estimate_is_seeded;  // true if current value came from a seed, not a real sample
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1
     float   _pitch;     // requested pitch as a value from -1 to +1
