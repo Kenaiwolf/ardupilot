@@ -68,12 +68,13 @@ void ModeGuided::update()
                 // target, re-read every tick), otherwise the crab-angle correction  
                 // would compound cycle-over-cycle since apply_drift_compensation()  
                 // writes its result back into whatever variable is passed in  
-                float corrected_heading_cd = _desired_yaw_cd;  
-                apply_drift_compensation(corrected_heading_cd, _desired_speed);  
-  
-                // run steering and throttle controllers  
-                calc_steering_to_heading(corrected_heading_cd);  
-                calc_throttle(calc_speed_nudge(_desired_speed, is_negative(_desired_speed)), true);  
+                float corrected_heading_cd = _desired_yaw_cd;    
+                float corrected_speed = _desired_speed;  
+                apply_drift_compensation(corrected_heading_cd, corrected_speed);    
+    
+                // run steering and throttle controllers    
+                calc_steering_to_heading(corrected_heading_cd);    
+                calc_throttle(calc_speed_nudge(corrected_speed, is_negative(corrected_speed)), true);
             } else {
                 // we have reached the destination so stay here
                 if (rover.is_boat()) {
