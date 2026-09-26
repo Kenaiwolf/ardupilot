@@ -249,8 +249,7 @@ protected:
     // whether a heading target is currently being commanded (must be fresh,  
     // < 50 ms, so it auto-expires on mode switch or when a turn-rate controller  
     // takes over - manual modes like Acro/Steering never set it)  
-    uint32_t _steering_heading_active_ms = 0; 
-    uint32_t _steering_heading_active_ms; // millis() of last heading-mode steering request; 0 = never  
+    uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
   
     // steering-to-throttle floor (vectored-thrust runaway prevention)  
     static constexpr float STEER_THR_FLOOR_DEADBAND_DEG = 10.0f;   // heading error (deg) below which no forced floor throttle is applied  
