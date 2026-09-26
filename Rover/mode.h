@@ -730,10 +730,6 @@ protected:
     float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend  
     uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting  
   
-    // minimum drift magnitude (m/s) before the anti-drift heading is applied  
-    // inside the circle; below this the frozen-heading coast is cheaper  
-    static constexpr float LOITER_DRIFT_MIN_MPS = 0.03f;  
-  
     // hysteresis band on the loiter-radius boundary so heading logic does not  
     // flap between "aim at center" and "aim into drift" while oscillating  
     static constexpr float LOITER_RADIUS_HYST = 0.10f;   // 10% of loiter_radius  

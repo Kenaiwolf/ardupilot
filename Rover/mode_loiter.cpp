@@ -81,7 +81,7 @@ void ModeLoiter::update()
         // would permanently trigger the steering floor and fight the drift-FF.    
         Vector2f drift_ne;    
         if (g2.motors.get_current_estimate_ne(drift_ne) &&    
-            drift_ne.length() > LOITER_DRIFT_MIN_MPS) {    
+            drift_ne.length() > g2.motors.get_loit_drift_min_mps()) {   
             // heading = bearing of -drift (point at where drift comes FROM...    
             // i.e. thrust points opposite the drift velocity)    
             _desired_yaw_cd = rad_to_cd(atan2f(-drift_ne.y, -drift_ne.x));    
@@ -101,8 +101,8 @@ void ModeLoiter::update()
         // gate on the pre-floor PID demand, not the motor output: the  
         // steering-to-throttle floor can hold real thrust while the PID is  
         // requesting zero, which would falsely disqualify a true coast  
-        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&      
-            fabsf(_throttle_nav_pct) < LOITER_DRIFT_THR_PCT &&    
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&    
+            fabsf(_throttle_nav_pct) < g2.motors.get_loit_coast_thr_pct() &&    
             !_steer_floor_active) {
             Vector3f vel_ned;  
             if (ahrs.get_velocity_NED(vel_ned)) {  
@@ -139,15 +139,15 @@ void ModeLoiter::update()
         const bool pid_at_equilibrium = is_zero(_desired_speed) &&    
                                         !_steer_floor_active &&    
                                         fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&    
-                                        fabsf(tinfo.error) <= LOITER_DRIFT_I_EQ_ERR_MPS &&    
-                                        fabsf(tinfo.I) >= LOITER_DRIFT_I_MIN; 
+                                        fabsf(tinfo.error) <= g2.motors.get_loit_i_eq_err_mps() &&    
+                                        fabsf(tinfo.I) >= g2.motors.get_loit_i_min(); 
         if (pid_at_equilibrium) {  
             const float i_mag = fabsf(tinfo.I);  
             if (!_drift_i_filt_valid) {  
                 _drift_i_filt = i_mag;  
                 _drift_i_filt_valid = true;  
             } else {  
-                _drift_i_filt += (i_mag - _drift_i_filt) * LOITER_DRIFT_I_ALPHA;  
+                _drift_i_filt += (i_mag - _drift_i_filt) * g2.motors.get_loit_i_alpha();  
             }  
   
             // convert filtered I (throttle fraction 0-1) to drift speed via the  
@@ -185,7 +185,7 @@ void ModeLoiter::update()
                 // estimate in one shot, blend a fraction of the way  
                 if (g2.motors.get_current_estimate_ne(prev_ne)) {  
                     const Vector2f dv = new_est - prev_ne;  
-                    if (dv.length() > LOITER_DRIFT_I_DISAGREE * MAX(prev_ne.length(), 0.1f)) {  
+                    if (dv.length() > g2.motors.get_loit_i_disagree() * MAX(prev_ne.length(), 0.1f)) {  
                         new_est = prev_ne + dv * 0.25f;  
                     }  
                 }  

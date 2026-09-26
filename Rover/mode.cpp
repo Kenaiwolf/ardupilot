@@ -381,9 +381,7 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         const float yaw_error_deg = fabsf(degrees(yaw_error_rad));  
   
         // 3. I-term Windup Suppression: Freeze integration if heading error is critical  
-        // (Threshold configured to 45 degrees as standard safety limit)  
-        if (yaw_error_deg > STEER_THR_FLOOR_I_FREEZE_DEG) {  
-            // Signal upstream speed/position PID to stop integrating  
+        if (yaw_error_deg > g2.motors.get_steer_floor_ifreeze_deg()) {  
             g2.motors.limit.throttle_upper = true;  
             g2.motors.limit.throttle_lower = true;  
         }  
@@ -392,21 +390,22 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
   
         // 2. Steering Thrust Floor: force minimum throttle to allow rotation  
-        if (yaw_error_deg > STEER_THR_FLOOR_DEADBAND_DEG) {  
-            const float steer_throttle_floor = constrain_float(  
-                (yaw_error_deg - STEER_THR_FLOOR_DEADBAND_DEG) * STEER_THR_FLOOR_GAIN_PCT_PER_DEG,  
-                0.0f, STEER_THR_FLOOR_MAX_PCT);  
+        if (yaw_error_deg > g2.motors.get_steer_floor_deadband_deg()) {
+            _steer_floor_active = false; 			
+            const float steer_throttle_floor = constrain_float(    
+                (yaw_error_deg - g2.motors.get_steer_floor_deadband_deg()) * g2.motors.get_steer_floor_gain(),    
+                0.0f, g2.motors.get_steer_floor_max_pct());  
             // do not override a throttle that is already stronger than the floor in    
             // the same direction; only raise the magnitude, never flip its sign    
             if (fabsf(throttle_out) < steer_throttle_floor) {    
                 throttle_out = is_negative(throttle_out) ? -steer_throttle_floor : steer_throttle_floor;    
                 _steer_floor_active = true;    
+            } else {    
+                _steer_floor_active = false;    
             }    
         } else {    
             _steer_floor_active = false;    
         }    
-    } else {    
-        _steer_floor_active = false;    
     } else {    
         _steer_floor_active = false;    
     } 
