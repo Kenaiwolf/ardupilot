@@ -77,8 +77,11 @@ void ModeLoiter::update()
         }  
         _drift_last_distance = _distance_to_destination;  
   
-        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&  
-            fabsf(g2.motors.get_throttle()) < LOITER_DRIFT_THR_PCT) {  
+        // gate on the pre-floor PID demand, not the motor output: the  
+        // steering-to-throttle floor can hold real thrust while the PID is  
+        // requesting zero, which would falsely disqualify a true coast  
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&    
+            fabsf(_throttle_nav_pct) < LOITER_DRIFT_THR_PCT) {
             Vector3f vel_ned;  
             if (ahrs.get_velocity_NED(vel_ned)) {  
                 Vector2f sample_ne{vel_ned.x, vel_ned.y};  
@@ -101,8 +104,73 @@ void ModeLoiter::update()
                     sample_ne += ahrs.body_to_earth2D(ff_body);    
                 }    
     
-                g2.motors.set_loiter_estimate_ne(sample_ne); 
+                g2.motors.set_loiter_estimate_ne(sample_ne);   
+            }    
+        }  
+  
+        // method 2: PID-residual drift measurement during the active  
+        // decel-to-stop window. while the speed PID is still running  
+        // (not yet "stopped", which would reset I), its I-term IS the  
+        // thrust needed to hold position against environmental drift.  
+        // equilibrium = commanded ~0, actual ~0, error small.  
+        const AP_PIDInfo& tinfo = attitude_control.get_throttle_speed_pid_info();  
+        const bool pid_at_equilibrium = is_zero(_desired_speed) &&  
+                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&  
+                                        fabsf(tinfo.error) <= LOITER_DRIFT_I_EQ_ERR_MPS &&  
+                                        fabsf(tinfo.I) >= LOITER_DRIFT_I_MIN;  
+        if (pid_at_equilibrium) {  
+            const float i_mag = fabsf(tinfo.I);  
+            if (!_drift_i_filt_valid) {  
+                _drift_i_filt = i_mag;  
+                _drift_i_filt_valid = true;  
+            } else {  
+                _drift_i_filt += (i_mag - _drift_i_filt) * LOITER_DRIFT_I_ALPHA;  
             }  
+  
+            // convert filtered I (throttle fraction 0-1) to drift speed via the  
+            // inverse of the throttle->speed curve: v = cruise * (t/t_cruise)^(1/expo)  
+            const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
+            const float cruise_thr = MAX(g.throttle_cruise * 0.01f, 0.01f);  
+            const float expo = attitude_control.get_speed_thr_expo();  
+            const float drift_mag_mps = cruise_speed * powf(_drift_i_filt / cruise_thr, 1.0f / expo);  
+  
+            // direction: the I-term holds position AGAINST the drift, so drift  
+            // points opposite to the thrust direction. thrust direction is  
+            // heading + vector angle (not directly observable here); use the  
+            // existing estimate's direction if we have one (it is updated by  
+            // method-1 coast samples), otherwise the measured velocity  
+            // direction if the boat is still sliding slightly.  
+            Vector2f est_dir_ne;  
+            Vector2f prev_ne;  
+            if (g2.motors.get_current_estimate_ne(prev_ne) && prev_ne.length_squared() > sq(0.01f)) {  
+                est_dir_ne = prev_ne.normalized();  
+            } else {  
+                Vector3f vel_ned;  
+                if (ahrs.get_velocity_NED(vel_ned)) {  
+                    const Vector2f v_ne{vel_ned.x, vel_ned.y};  
+                    if (v_ne.length_squared() > sq(0.02f)) {  
+                        est_dir_ne = v_ne.normalized();  
+                    }  
+                }  
+            }  
+  
+            if (!est_dir_ne.is_zero()) {  
+                Vector2f new_est = est_dir_ne * drift_mag_mps;  
+                // NAV-style disagreement gate: don't jump to a very different  
+                // estimate in one shot, blend a fraction of the way  
+                if (g2.motors.get_current_estimate_ne(prev_ne)) {  
+                    const Vector2f dv = new_est - prev_ne;  
+                    if (dv.length() > LOITER_DRIFT_I_DISAGREE * MAX(prev_ne.length(), 0.1f)) {  
+                        new_est = prev_ne + dv * 0.25f;  
+                    }  
+                }  
+                g2.motors.set_loiter_estimate_ne(new_est);  
+            }  
+        } else {  
+            // PID left equilibrium (still decelerating hard, or already  
+            // stopped with I reset) - decay validity so a stale filtered  
+            // value isn't reused after conditions change  
+            _drift_i_filt_valid = false;  
         }  
     } else {  
         _drift_rising_count = 0;  

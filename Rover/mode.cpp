@@ -357,6 +357,10 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }
     }
 
+    // record the raw PID navigation demand before any feed-forward or floor  
+    // modifications - drift sampling uses this, never the post-floor value  
+    _throttle_pid_out = throttle_out;  
+  
     // forward drift/current feed-forward: added directly to throttle output,
     // never to target_speed, so it doesn't shift the PID's ground-speed setpoint
     Vector2f drift_body;  
@@ -369,8 +373,12 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         throttle_out += drift_body.x * local_slope;  
     }  
   
-    // steering-to-throttle floor and runaway prevention (vectored-thrust safety fix)  
-     if (g2.motors.have_vectored_thrust() &&  
+    // record pure navigation/PID throttle before floor injection so drift    
+    // samplers can detect true coasting regardless of steering-floor activity    
+    _throttle_nav_pct = throttle_out;    
+    
+    // steering-to-throttle floor and runaway prevention (vectored-thrust safety fix)    
+    if (g2.motors.have_vectored_thrust() &&
         _steering_heading_active_ms != 0 &&  
         (AP_HAL::millis() - _steering_heading_active_ms) < 50) {
         const float yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  

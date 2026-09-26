@@ -244,12 +244,25 @@ protected:
     bool _reached_destination;  // true once the vehicle has reached the destination  
     float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter  
   
+    // last throttle requested by the speed/position PID, captured BEFORE  
+    // drift feed-forward and the steering-to-throttle floor are applied.  
+    // used by loiter drift sampling as the "true navigation demand" so the  
+    // coasting gate cannot be fooled by floor-injected thrust.  
+    float _throttle_pid_out = 0.0f;
+  
     // timestamp (ms) of the last call to calc_steering_to_heading(); used by the  
     // vectored-thrust steering-to-throttle floor in calc_throttle() to detect  
     // whether a heading target is currently being commanded (must be fresh,  
     // < 50 ms, so it auto-expires on mode switch or when a turn-rate controller  
     // takes over - manual modes like Acro/Steering never set it)  
-    uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
+   uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never  
+  
+    // throttle output before the steering-floor is applied (i.e. the pure  
+    // nav/PID request). Written unconditionally every tick by calc_throttle(),  
+    // so it is always fresh. Used by ModeLoiter's drift sampler to detect true  
+    // coasting: get_throttle() reads the motor output AFTER the floor, which  
+    // would falsely report non-zero throttle while the boat is steering in place  
+    float _throttle_nav_pct = 0.0f;
   
     // steering-to-throttle floor (vectored-thrust runaway prevention)  
     static constexpr float STEER_THR_FLOOR_DEADBAND_DEG = 10.0f;   // heading error (deg) below which no forced floor throttle is applied  
@@ -712,11 +725,31 @@ protected:
     Location _destination;      // target location to hold position around
     float _desired_speed;       // desired speed (ramped down from initial speed to zero)
 
-    // current/wind drift-estimate detection state
-    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample
-    static constexpr float LOITER_DRIFT_THR_PCT = 1.0f;          // throttle output (%) below which the vehicle is considered to be coasting for drift sampling purposes
-    float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend
-    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting
+    // current/wind drift-estimate detection state  
+    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample  
+    static constexpr float LOITER_DRIFT_THR_PCT = 1.0f;          // throttle output (%) below which the vehicle is considered to be coasting for drift sampling purposes  
+    static constexpr float LOITER_DRIFT_I_EQ_ERR_MPS = 0.10f;    // speed-PID error (m/s) below which the I-term is considered to be at drift equilibrium  
+    static constexpr float LOITER_DRIFT_I_MIN = 0.02f;           // minimum I-term magnitude (0-1) worth storing as a drift sample  
+    static constexpr float LOITER_DRIFT_I_ALPHA = 0.10f;         // EMA alpha for I-term magnitude filtering  
+    static constexpr float LOITER_DRIFT_I_DISAGREE = 0.5f;       // if new magnitude differs from existing estimate by more than this fraction, blend only 25% of the way (NAV-style trend check)  
+  
+    // method-2 sampling state: filtered I-term magnitude while the speed PID  
+    // is actively holding the vehicle against drift (decel-to-stop window)  
+    float _drift_i_filt = 0.0f;  
+    bool  _drift_i_filt_valid = false; 
+    float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend  
+    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting  
+  
+    // method-2: PID-residual drift sampling during active braking to a stop  
+    // (desired_speed==0 && !stopped). I-term equilibrium = thrust needed to  
+    // cancel drift. EMA + disagreement gate mirrors update_drift_estimator().  
+    static constexpr float LOITER_DRIFT2_EMA_ALPHA = 0.25f;          // EMA weight of each accepted equilibrium sample  
+    static constexpr float LOITER_DRIFT2_DISAGREE_MPS = 0.5f;        // sample vs stored-estimate disagreement that triggers down-weighting  
+    static constexpr float LOITER_DRIFT2_EQ_SOG_MPS = 0.15f;         // |SOG| below which the sample is considered "at equilibrium"  
+    static constexpr uint8_t LOITER_DRIFT2_EQ_TICKS = 10;            // consecutive low-SOG ticks required before accepting a sample (~200ms at 50Hz)  
+    float _drift2_ema_i = 0.0f;         // EMA of PID I-term seen during braking window (throttle %)  
+    uint8_t _drift2_eq_count = 0;       // consecutive equilibrium ticks so far this window  
+    uint32_t _drift2_last_sample_ms = 0; // millis() of last accepted sample (staleness / arbitration)  
 };
 
 class ModeManual : public Mode
