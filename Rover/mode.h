@@ -239,10 +239,16 @@ protected:
     class RC_Channel *&channel_walking_height;
     class AR_AttitudeControl &attitude_control;
 
-    // private members for waypoint navigation
-    float _distance_to_destination; // straight-line distance from vehicle to final destination in meters
-    bool _reached_destination;  // true once the vehicle has reached the destination
-    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter
+    // private members for waypoint navigation  
+    float _distance_to_destination; // straight-line distance from vehicle to final destination in meters  
+    bool _reached_destination;  // true once the vehicle has reached the destination  
+    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter  
+  
+    // steering-to-throttle floor (vectored-thrust runaway prevention)  
+    static constexpr float STEER_THR_FLOOR_DEADBAND_DEG = 10.0f;   // heading error (deg) below which no forced floor throttle is applied  
+    static constexpr float STEER_THR_FLOOR_GAIN_PCT_PER_DEG = 1.0f; // floor throttle (%) added per degree of heading error beyond the deadband  
+    static constexpr float STEER_THR_FLOOR_MAX_PCT = 20.0f;        // maximum floor throttle (%) regardless of heading error magnitude  
+    static constexpr float STEER_THR_FLOOR_I_FREEZE_DEG = 45.0f;   // heading error (deg) beyond which upstream speed/position PID I-term is frozen  
 };
 
 

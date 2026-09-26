@@ -365,12 +365,41 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
         const float speed_ratio = fabsf(target_speed) / cruise_speed;  
         const float local_slope = (g.throttle_cruise * expo / cruise_speed) * powf(MAX(speed_ratio, 0.01f), expo - 1.0f);  
-        // gain already applied at write-time - see get_drift_compensation_body()  
-        throttle_out += drift_body.x * local_slope;
-    }
-
-    // send to motor  
-    g2.motors.set_throttle(throttle_out);  
+    // gain already applied at write-time - see get_drift_compensation_body()    
+        throttle_out += drift_body.x * local_slope;  
+    }  
+  
+    // steering-to-throttle floor and runaway prevention (vectored-thrust safety fix)  
+    if (g2.motors.have_vectored_thrust()) {  
+        const float yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  
+        const float yaw_error_deg = fabsf(degrees(yaw_error_rad));  
+  
+        // 3. I-term Windup Suppression: Freeze integration if heading error is critical  
+        // (Threshold configured to 45 degrees as standard safety limit)  
+        if (yaw_error_deg > STEER_THR_FLOOR_I_FREEZE_DEG) {  
+            // Signal upstream speed/position PID to stop integrating  
+            g2.motors.limit.throttle_upper = true;  
+            g2.motors.limit.throttle_lower = true;  
+        }  
+  
+        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error  
+        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
+  
+        // 2. Steering Thrust Floor: force minimum throttle to allow rotation  
+        if (yaw_error_deg > STEER_THR_FLOOR_DEADBAND_DEG) {  
+            const float steer_throttle_floor = constrain_float(  
+                (yaw_error_deg - STEER_THR_FLOOR_DEADBAND_DEG) * STEER_THR_FLOOR_GAIN_PCT_PER_DEG,  
+                0.0f, STEER_THR_FLOOR_MAX_PCT);  
+            // do not override a throttle that is already stronger than the floor in  
+            // the same direction; only raise the magnitude, never flip its sign  
+            if (fabsf(throttle_out) < steer_throttle_floor) {  
+                throttle_out = is_negative(throttle_out) ? -steer_throttle_floor : steer_throttle_floor;  
+            }  
+        }  
+    }  
+  
+    // send to motor    
+    g2.motors.set_throttle(throttle_out);
 }
 
 // performs a controlled stop without turning
