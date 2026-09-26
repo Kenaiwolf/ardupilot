@@ -179,15 +179,92 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @User: Advanced  
     AP_GROUPINFO("DRIFT_GAIN_NAV", 24, AP_MotorsUGV, _drift_comp_gain_nav, 1.0f),  
   
-    // @Param: DRIFT_MAXAGE  
-    // @DisplayName: Drift estimate maximum age  
-    // @Description: Shared staleness cutoff common to both Loiter- and Guided-sourced drift estimates. If neither source has been updated within this many seconds, the drift correction is treated as fully expired (0 = no correction), on the assumption that the wind/current has stopped  
-    // @Units: s  
-    // @Range: 0 3600  
-    // @User: Advanced  
-    AP_GROUPINFO("DRIFT_MAXAGE", 25, AP_MotorsUGV, _drift_max_age_s, 1800.0f),
-
-    AP_GROUPEND
+    // @Param: DRIFT_MAXAGE    
+    // @DisplayName: Drift estimate maximum age    
+    // @Description: Shared staleness cutoff common to both Loiter- and Guided-sourced drift estimates. If neither source has been updated within this many seconds, the drift correction is treated as fully expired (0 = no correction), on the assumption that the wind/current has stopped    
+    // @Units: s    
+    // @Range: 0 3600    
+    // @User: Advanced    
+    AP_GROUPINFO("DRIFT_MAXAGE", 25, AP_MotorsUGV, _drift_max_age_s, 1800.0f),  
+  
+    // @Param: SFL_DB    
+    // @DisplayName: Steering-floor deadband    
+    // @Description: Heading error (deg) below which the vectored-thrust steering-to-throttle floor injects no throttle    
+    // @Units: deg    
+    // @Range: 0 45    
+    // @User: Advanced    
+    AP_GROUPINFO("SFL_DB", 26, AP_MotorsUGV, _sfl_deadband_deg, 10.0f),  
+  
+    // @Param: SFL_GAIN    
+    // @DisplayName: Steering-floor gain    
+    // @Description: Floor throttle percent per degree of heading error above the deadband    
+    // @Units: %/deg    
+    // @Range: 0 5    
+    // @User: Advanced    
+    AP_GROUPINFO("SFL_GAIN", 27, AP_MotorsUGV, _sfl_gain, 0.5f),  
+  
+    // @Param: SFL_MAX    
+    // @DisplayName: Steering-floor maximum    
+    // @Description: Maximum throttle percent the steering-floor is allowed to inject    
+    // @Units: %    
+    // @Range: 0 50    
+    // @User: Advanced    
+    AP_GROUPINFO("SFL_MAX", 28, AP_MotorsUGV, _sfl_max_pct, 20.0f),  
+  
+    // @Param: SFL_IFRZ    
+    // @DisplayName: Steering-floor I-term freeze threshold    
+    // @Description: Heading error (deg) above which the speed PID integrator is frozen to prevent windup while rotating in place    
+    // @Units: deg    
+    // @Range: 10 90    
+    // @User: Advanced    
+    AP_GROUPINFO("SFL_IFRZ", 29, AP_MotorsUGV, _sfl_ifreeze_deg, 45.0f),  
+  
+    // @Param: LOIT_DRIFT_MIN    
+    // @DisplayName: Loiter drift minimum magnitude    
+    // @Description: Drift estimate (m/s) below which the loiter anti-drift heading is not activated; deadband against GPS/estimate noise    
+    // @Units: m/s    
+    // @Range: 0 0.5    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_DRIFT_MIN", 30, AP_MotorsUGV, _loit_drift_min, 0.03f),  
+  
+    // @Param: LOIT_COAST_THR    
+    // @DisplayName: Loiter coasting throttle threshold    
+    // @Description: Pre-floor navigation throttle demand (%) below which the vehicle is considered coasting for method-1 drift sampling    
+    // @Units: %    
+    // @Range: 0 10    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_COAST_THR", 31, AP_MotorsUGV, _loit_coast_thr, 1.0f),  
+  
+    // @Param: LOIT_I_EQERR    
+    // @DisplayName: Loiter drift method-2 equilibrium error    
+    // @Description: Speed-PID error (m/s) below which the I-term is considered at drift equilibrium during the decel-to-stop window    
+    // @Units: m/s    
+    // @Range: 0 0.5    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_I_EQERR", 32, AP_MotorsUGV, _loit_i_eq_err, 0.10f),  
+  
+    // @Param: LOIT_I_MIN    
+    // @DisplayName: Loiter drift method-2 minimum I-term    
+    // @Description: Minimum speed-PID I-term magnitude (0-1 throttle fraction) accepted as a valid drift sample; below this there is nothing to compensate    
+    // @Range: 0 0.5    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_I_MIN", 33, AP_MotorsUGV, _loit_i_min, 0.02f),  
+  
+    // @Param: LOIT_I_ALPHA    
+    // @DisplayName: Loiter drift method-2 EMA alpha    
+    // @Description: EMA weight applied to each I-term sample during the equilibrium window; lower = smoother but slower    
+    // @Range: 0.01 1.0    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_I_ALPHA", 34, AP_MotorsUGV, _loit_i_alpha, 0.10f),  
+  
+    // @Param: LOIT_I_DISAG    
+    // @DisplayName: Loiter drift method-2 disagreement gate    
+    // @Description: If a new estimate differs from the stored one by more than this fraction of its magnitude, blend only 25% of the way (NAV-style trend check)    
+    // @Range: 0.1 2.0    
+    // @User: Advanced    
+    AP_GROUPINFO("LOIT_I_DISAG", 35, AP_MotorsUGV, _loit_i_disagree, 0.5f),  
+  
+    AP_GROUPEND  
 };
 
 AP_MotorsUGV::AP_MotorsUGV(AP_WheelRateControl& rate_controller) :  

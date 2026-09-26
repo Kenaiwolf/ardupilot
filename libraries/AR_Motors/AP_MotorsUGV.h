@@ -90,8 +90,20 @@ public:
     // true if vehicle is capable of skid steering
     bool have_skid_steering() const;
 
-    // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)
-    bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }
+    // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)  
+    bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }  
+  
+    // steering-floor / loiter-drift tunable getters (used by Mode::calc_throttle and ModeLoiter)  
+    float get_steer_floor_deadband_deg() const { return _sfl_deadband_deg; }  
+    float get_steer_floor_gain()             const { return _sfl_gain; }  
+    float get_steer_floor_max_pct()          const { return _sfl_max_pct; }  
+    float get_steer_floor_ifreeze_deg()      const { return _sfl_ifreeze_deg; }  
+    float get_loit_drift_min_mps()           const { return _loit_drift_min; }  
+    float get_loit_coast_thr_pct()           const { return _loit_coast_thr; }  
+    float get_loit_i_eq_err_mps()            const { return _loit_i_eq_err; }  
+    float get_loit_i_min()                   const { return _loit_i_min; }  
+    float get_loit_i_alpha()                 const { return _loit_i_alpha; }  
+    float get_loit_i_disagree()              const { return _loit_i_disagree; }
 
     // set an externally-measured wind+current drift estimate (m/s, North/East), one
     // independent slot per acquisition method.  the per-source gain (DRIFT_GAIN_LOIT /
@@ -257,7 +269,20 @@ private:
     AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power
     AP_Float _vec_deadband;    // deadband on total commanded steering/throttle vector magnitude below which the vectored-thrust angle is frozen instead of recalculated, suppressing atan() noise amplification near zero throttle
     AP_Float _vec_blend_thr;   // filtered throttle (normalised 0~1) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle)
-    AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime
+    AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime  
+  
+    // steering-to-throttle floor tunables (vectored-thrust runaway prevention)  
+    AP_Float _sfl_deadband_deg;    // heading error (deg) below which no floor throttle is injected  
+    AP_Float _sfl_gain;            // floor throttle % per degree of error above deadband  
+    AP_Float _sfl_max_pct;         // maximum floor throttle (%)  
+    AP_Float _sfl_ifreeze_deg;     // heading error (deg) above which speed-PID I-term is frozen  
+    // loiter drift-estimation tunables  
+    AP_Float _loit_drift_min;      // minimum drift magnitude (m/s) to activate anti-drift heading in loiter  
+    AP_Float _loit_coast_thr;      // pre-floor throttle demand (%) below which the vehicle is considered coasting  
+    AP_Float _loit_i_eq_err;       // speed-PID error (m/s) below which I-term is at drift equilibrium  
+    AP_Float _loit_i_min;          // minimum I-term magnitude (0-1) accepted as a drift sample  
+    AP_Float _loit_i_alpha;        // EMA alpha for I-term magnitude filtering  
+    AP_Float _loit_i_disagree;     // fraction by which a new sample may differ before being down-weighted to 25%
     AP_Float _drift_comp_gain_loiter;  // gain applied to a Loiter-sourced drift sample at the moment it is written via set_loiter_estimate_ne().  zero to disable that source entirely
     AP_Float _drift_comp_gain_nav;  // gain applied to nav-sourced drift sample at write-time via set_nav_estimate_ne(). zero disables this source
     AP_Float _drift_max_age_s;   // shared staleness cutoff (s) common to both sources: if neither has been updated within this many seconds, get_current_estimate_ne() returns false (correction fully off).  e.g. 1800 = 30min
