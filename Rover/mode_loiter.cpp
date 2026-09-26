@@ -55,16 +55,37 @@ void ModeLoiter::update()
   
     const float loiter_radius = g2.sailboat.tack_enabled() ? g2.sailboat.get_loiter_radius() : g2.loit_radius;  
   
-    // if within loiter radius slew desired speed towards zero and use existing desired heading  
-    if (_distance_to_destination <= loiter_radius) {  
+    // sticky inside/outside state with a 10% hysteresis band so the heading    
+    // logic (aim-at-center vs aim-into-drift) does not flap at the boundary    
+    if (_inside_loiter_circle) {    
+        _inside_loiter_circle = (_distance_to_destination <= loiter_radius * (1.0f + LOITER_RADIUS_HYST));    
+    } else {    
+        _inside_loiter_circle = (_distance_to_destination <= loiter_radius);    
+    }    
+  
+    // if within loiter radius slew desired speed towards zero and use existing desired heading    
+    if (_inside_loiter_circle) {  
         // sailboats should not stop unless motoring  
         const float desired_speed_within_radius = g2.sailboat.tack_enabled() ? 0.1f : 0.0f;  
         _desired_speed = attitude_control.get_desired_speed_accel_limited(desired_speed_within_radius, rover.G_Dt);  
   
-        // if we have a sail but not trying to use it then point into the wind  
-        if (!g2.sailboat.tack_enabled() && g2.sailboat.sail_enabled()) {  
-            _desired_yaw_cd = degrees(g2.windvane.get_true_wind_direction_rad()) * 100.0f;  
-        }  
+        // if we have a sail but not trying to use it then point into the wind    
+        if (!g2.sailboat.tack_enabled() && g2.sailboat.sail_enabled()) {    
+            _desired_yaw_cd = degrees(g2.windvane.get_true_wind_direction_rad()) * 100.0f;    
+        }    
+  
+        // vectored-thrust drift hold: if a valid drift estimate exists, aim the    
+        // thruster INTO the drift (bow-pull convention: motor pulls the boat    
+        // opposite the drift vector). For a stern-push outboard invert by 180 deg.    
+        // This replaces heading-freeze: a frozen heading with a large error    
+        // would permanently trigger the steering floor and fight the drift-FF.    
+        Vector2f drift_ne;    
+        if (g2.motors.get_current_estimate_ne(drift_ne) &&    
+            drift_ne.length() > LOITER_DRIFT_MIN_MPS) {    
+            // heading = bearing of -drift (point at where drift comes FROM...    
+            // i.e. thrust points opposite the drift velocity)    
+            _desired_yaw_cd = rad_to_cd(atan2f(-drift_ne.y, -drift_ne.x));    
+        } 
   
         // current/wind drift-estimate sampling: only trust a sample once distance-to-  
         // destination has been consistently rising (i.e. the vehicle is being pushed  
@@ -80,8 +101,9 @@ void ModeLoiter::update()
         // gate on the pre-floor PID demand, not the motor output: the  
         // steering-to-throttle floor can hold real thrust while the PID is  
         // requesting zero, which would falsely disqualify a true coast  
-        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&    
-            fabsf(_throttle_nav_pct) < LOITER_DRIFT_THR_PCT) {
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&      
+            fabsf(_throttle_nav_pct) < LOITER_DRIFT_THR_PCT &&    
+            !_steer_floor_active) {
             Vector3f vel_ned;  
             if (ahrs.get_velocity_NED(vel_ned)) {  
                 Vector2f sample_ne{vel_ned.x, vel_ned.y};  
@@ -114,10 +136,11 @@ void ModeLoiter::update()
         // thrust needed to hold position against environmental drift.  
         // equilibrium = commanded ~0, actual ~0, error small.  
         const AP_PIDInfo& tinfo = attitude_control.get_throttle_speed_pid_info();  
-        const bool pid_at_equilibrium = is_zero(_desired_speed) &&  
-                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&  
-                                        fabsf(tinfo.error) <= LOITER_DRIFT_I_EQ_ERR_MPS &&  
-                                        fabsf(tinfo.I) >= LOITER_DRIFT_I_MIN;  
+        const bool pid_at_equilibrium = is_zero(_desired_speed) &&    
+                                        !_steer_floor_active &&    
+                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&    
+                                        fabsf(tinfo.error) <= LOITER_DRIFT_I_EQ_ERR_MPS &&    
+                                        fabsf(tinfo.I) >= LOITER_DRIFT_I_MIN; 
         if (pid_at_equilibrium) {  
             const float i_mag = fabsf(tinfo.I);  
             if (!_drift_i_filt_valid) {  
@@ -132,7 +155,9 @@ void ModeLoiter::update()
             const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
             const float cruise_thr = MAX(g.throttle_cruise * 0.01f, 0.01f);  
             const float expo = attitude_control.get_speed_thr_expo();  
-            const float drift_mag_mps = cruise_speed * powf(_drift_i_filt / cruise_thr, 1.0f / expo);  
+            // clamp: if filtered I exceeds cruise throttle the powf() above    
+            // would extrapolate beyond the calibrated curve - cap at cruise    
+            const float drift_mag_mps = MIN(cruise_speed * powf(_drift_i_filt / cruise_thr, 1.0f / expo), cruise_speed);
   
             // direction: the I-term holds position AGAINST the drift, so drift  
             // points opposite to the thrust direction. thrust direction is  

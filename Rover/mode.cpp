@@ -357,10 +357,6 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }
     }
 
-    // record the raw PID navigation demand before any feed-forward or floor  
-    // modifications - drift sampling uses this, never the post-floor value  
-    _throttle_pid_out = throttle_out;  
-  
     // forward drift/current feed-forward: added directly to throttle output,
     // never to target_speed, so it doesn't shift the PID's ground-speed setpoint
     Vector2f drift_body;  
@@ -400,13 +396,20 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
             const float steer_throttle_floor = constrain_float(  
                 (yaw_error_deg - STEER_THR_FLOOR_DEADBAND_DEG) * STEER_THR_FLOOR_GAIN_PCT_PER_DEG,  
                 0.0f, STEER_THR_FLOOR_MAX_PCT);  
-            // do not override a throttle that is already stronger than the floor in  
-            // the same direction; only raise the magnitude, never flip its sign  
-            if (fabsf(throttle_out) < steer_throttle_floor) {  
-                throttle_out = is_negative(throttle_out) ? -steer_throttle_floor : steer_throttle_floor;  
-            }  
-        }  
-    }  
+            // do not override a throttle that is already stronger than the floor in    
+            // the same direction; only raise the magnitude, never flip its sign    
+            if (fabsf(throttle_out) < steer_throttle_floor) {    
+                throttle_out = is_negative(throttle_out) ? -steer_throttle_floor : steer_throttle_floor;    
+                _steer_floor_active = true;    
+            }    
+        } else {    
+            _steer_floor_active = false;    
+        }    
+    } else {    
+        _steer_floor_active = false;    
+    } else {    
+        _steer_floor_active = false;    
+    } 
   
     // send to motor    
     g2.motors.set_throttle(throttle_out);
