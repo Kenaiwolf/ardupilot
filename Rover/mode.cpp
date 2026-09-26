@@ -370,7 +370,9 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     }  
   
     // steering-to-throttle floor and runaway prevention (vectored-thrust safety fix)  
-    if (g2.motors.have_vectored_thrust()) {  
+     if (g2.motors.have_vectored_thrust() &&  
+        _steering_heading_active_ms != 0 &&  
+        (AP_HAL::millis() - _steering_heading_active_ms) < 50) {
         const float yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  
         const float yaw_error_deg = fabsf(degrees(yaw_error_rad));  
   
@@ -741,9 +743,16 @@ void Mode::calc_steering_from_lateral_acceleration(float lat_accel, bool reverse
 
 // calculate steering output to drive towards desired heading
 // rate_max is a maximum turn rate in deg/s.  set to zero to use default turn rate limits
-void Mode::calc_steering_to_heading(float desired_heading_cd, float rate_max_degs)
-{
-    // call heading controller
+void Mode::calc_steering_to_heading(float desired_heading_cd, float rate_max_degs)  
+{  
+    // record the heading target and timestamp so calc_throttle() can compute a  
+    // trustworthy yaw error for the vectored-thrust steering floor. writing  
+    // _desired_yaw_cd here (not only in mode update() bodies) keeps it correct  
+    // for callers that use a local heading target (e.g. ModeSimple).  
+    _desired_yaw_cd = desired_heading_cd;  
+    _steering_heading_active_ms = AP_HAL::millis();  
+  
+    // call heading controller  
     const float steering_out = attitude_control.get_steering_out_heading(radians(desired_heading_cd*0.01f),
                                                                          radians(rate_max_degs),
                                                                          g2.motors.limit.steer_left,

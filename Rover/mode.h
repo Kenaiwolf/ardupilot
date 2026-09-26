@@ -244,6 +244,14 @@ protected:
     bool _reached_destination;  // true once the vehicle has reached the destination  
     float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter  
   
+    // timestamp (ms) of the last call to calc_steering_to_heading(); used by the  
+    // vectored-thrust steering-to-throttle floor in calc_throttle() to detect  
+    // whether a heading target is currently being commanded (must be fresh,  
+    // < 50 ms, so it auto-expires on mode switch or when a turn-rate controller  
+    // takes over - manual modes like Acro/Steering never set it)  
+    uint32_t _steering_heading_active_ms = 0; 
+    uint32_t _steering_heading_active_ms; // millis() of last heading-mode steering request; 0 = never  
+  
     // steering-to-throttle floor (vectored-thrust runaway prevention)  
     static constexpr float STEER_THR_FLOOR_DEADBAND_DEG = 10.0f;   // heading error (deg) below which no forced floor throttle is applied  
     static constexpr float STEER_THR_FLOOR_GAIN_PCT_PER_DEG = 1.0f; // floor throttle (%) added per degree of heading error beyond the deadband  
