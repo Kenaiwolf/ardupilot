@@ -334,7 +334,21 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     }
 #endif  // AP_AVOIDANCE_ENABLED
 
-    // call throttle controller and convert output to -100 to +100 range
+    // compute freshness-gated heading error BEFORE the PID calls so the I-term  
+    // can be frozen directly via the motor_limit parameters (not via  
+    // g2.motors.limit, which is cleared in output() before reaching the PID)  
+    bool steer_i_freeze = false;  
+    float yaw_error_rad = 0.0f;  
+    float yaw_error_deg = 0.0f;  
+    const bool steering_heading_fresh = _steering_heading_active_ms != 0 &&  
+        (AP_HAL::millis() - _steering_heading_active_ms) < 50;  
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
+        yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  
+        yaw_error_deg = fabsf(degrees(yaw_error_rad));  
+        steer_i_freeze = yaw_error_deg > g2.motors.get_steer_floor_ifreeze_deg();  
+    }  
+  
+    // call throttle controller and convert output to -100 to +100 range  
     float throttle_out = 0.0f;
 
     if (g2.sailboat.sail_enabled()) {
@@ -342,13 +356,13 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         g2.sailboat.get_throttle_and_set_mainsail(target_speed, throttle_out);
     } else {
         // call speed or stop controller
-        if (is_zero(target_speed) && !rover.is_balancebot()) {
-            bool stopped;
-            throttle_out = 100.0f * attitude_control.get_throttle_out_stop(g2.motors.limit.throttle_lower, g2.motors.limit.throttle_upper, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt, stopped);
-        } else {
-            bool motor_lim_low = g2.motors.limit.throttle_lower || attitude_control.pitch_limited();
-            bool motor_lim_high = g2.motors.limit.throttle_upper || attitude_control.pitch_limited();
-            throttle_out = 100.0f * attitude_control.get_throttle_out_speed(target_speed, motor_lim_low, motor_lim_high, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt);
+        if (is_zero(target_speed) && !rover.is_balancebot()) {  
+            bool stopped;  
+            throttle_out = 100.0f * attitude_control.get_throttle_out_stop(steer_i_freeze || g2.motors.limit.throttle_lower, steer_i_freeze || g2.motors.limit.throttle_upper, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt, stopped);  
+        } else {  
+            bool motor_lim_low = steer_i_freeze || g2.motors.limit.throttle_lower || attitude_control.pitch_limited();  
+            bool motor_lim_high = steer_i_freeze || g2.motors.limit.throttle_upper || attitude_control.pitch_limited();  
+            throttle_out = 100.0f * attitude_control.get_throttle_out_speed(target_speed, motor_lim_low, motor_lim_high, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt);  
         }
 
         // if vehicle is balance bot, calculate actual throttle required for balancing
@@ -373,25 +387,16 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     // samplers can detect true coasting regardless of steering-floor activity    
     _throttle_nav_pct = throttle_out;    
     
-    // steering-to-throttle floor and runaway prevention (vectored-thrust safety fix)    
-    if (g2.motors.have_vectored_thrust() &&
-        _steering_heading_active_ms != 0 &&  
-        (AP_HAL::millis() - _steering_heading_active_ms) < 50) {
-        const float yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  
-        const float yaw_error_deg = fabsf(degrees(yaw_error_rad));  
+    // steering-to-throttle floor and runaway prevention (vectored-thrust safety  
+    // fix). yaw_error_* and steer_i_freeze were computed above, before the PID  
+    // calls, so the I-term freeze already reached the controller this tick  
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
   
-        // 3. I-term Windup Suppression: Freeze integration if heading error is critical  
-        if (yaw_error_deg > g2.motors.get_steer_floor_ifreeze_deg()) {  
-            g2.motors.limit.throttle_upper = true;  
-            g2.motors.limit.throttle_lower = true;  
-        }  
-  
-        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error  
-        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
+        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error    
+        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));
   
         // 2. Steering Thrust Floor: force minimum throttle to allow rotation  
         if (yaw_error_deg > g2.motors.get_steer_floor_deadband_deg()) {
-            _steer_floor_active = false; 			
             const float steer_throttle_floor = constrain_float(    
                 (yaw_error_deg - g2.motors.get_steer_floor_deadband_deg()) * g2.motors.get_steer_floor_gain(),    
                 0.0f, g2.motors.get_steer_floor_max_pct());  

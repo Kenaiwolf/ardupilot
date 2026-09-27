@@ -165,19 +165,32 @@ void ModeLoiter::update()
             // existing estimate's direction if we have one (it is updated by  
             // method-1 coast samples), otherwise the measured velocity  
             // direction if the boat is still sliding slightly.  
-            Vector2f est_dir_ne;  
-            Vector2f prev_ne;  
-            if (g2.motors.get_current_estimate_ne(prev_ne) && prev_ne.length_squared() > sq(0.01f)) {  
-                est_dir_ne = prev_ne.normalized();  
-            } else {  
-                Vector3f vel_ned;  
-                if (ahrs.get_velocity_NED(vel_ned)) {  
-                    const Vector2f v_ne{vel_ned.x, vel_ned.y};  
-                    if (v_ne.length_squared() > sq(0.02f)) {  
-                        est_dir_ne = v_ne.normalized();  
-                    }  
-                }  
-            }  
+            Vector2f est_dir_ne;    
+            Vector2f prev_ne;    
+            if (g2.motors.get_current_estimate_ne(prev_ne) && prev_ne.length_squared() > sq(0.01f)) {    
+                // best source: direction of the existing estimate (updated by    
+                // method-1 coast samples)    
+                est_dir_ne = prev_ne.normalized();    
+            } else {    
+                // fallback 1: residual velocity direction while still sliding    
+                Vector3f vel_ned;    
+                if (ahrs.get_velocity_NED(vel_ned)) {    
+                    const Vector2f v_ne{vel_ned.x, vel_ned.y};    
+                    if (v_ne.length_squared() > sq(0.02f)) {    
+                        est_dir_ne = v_ne.normalized();    
+                    }    
+                }    
+            }    
+            if (est_dir_ne.is_zero()) {    
+                // fallback 2 (first-ever sample, boat already at standstill):    
+                // drift points opposite the actual thrust vector. thrust dir in    
+                // earth frame = yaw + thruster steering angle    
+                const float steer_ang_rad = radians(g2.motors.get_steering() / 4500.0f)    
+                                            * radians(g2.motors.get_vector_angle_max());    
+                const float thrust_rad = ahrs.get_yaw_rad() + steer_ang_rad;    
+                // drift vector = opposite of the force that holds us in place    
+                est_dir_ne = Vector2f{-cosf(thrust_rad), -sinf(thrust_rad)};    
+            } 
   
             if (!est_dir_ne.is_zero()) {  
                 Vector2f new_est = est_dir_ne * drift_mag_mps;  
