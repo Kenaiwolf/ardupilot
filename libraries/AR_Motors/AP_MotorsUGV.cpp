@@ -141,14 +141,14 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
 
     // @Param: VEC_DEADBAND
     // @DisplayName: Vectored thrust deadband
-    // @Description: Deadband on total commanded steering/throttle vector magnitude (normalised) below which the vectored-thrust angle is frozen instead of recalculated, to suppress atan() noise amplification near zero throttle
+    // @Description: Commanded steering/throttle magnitude below which the vectored angle is frozen (anti-jitter near zero throttle)
     // @Range: 0.0 0.2
     // @User: Advanced
     AP_GROUPINFO("VEC_DEADBAND", 17, AP_MotorsUGV, _vec_deadband, 0.03f),
 
     // @Param: VEC_BLEND_THR
     // @DisplayName: Vectored thrust blend throttle
-    // @Description: Filtered throttle (normalised) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle), blending smoothly into the full atan() behaviour by twice this value
+    // @Description: Filtered throttle below which the vectored angle blends from direct steering-proportional angle into full atan(); 0 = legacy atan() always
     // @Range: 0.0 1.0
     // @User: Advanced
     AP_GROUPINFO("VEC_BLEND_THR", 18, AP_MotorsUGV, _vec_blend_thr, 0.3f),
@@ -167,21 +167,21 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
   
     // @Param: DRIFT_GAIN_LOIT  
     // @DisplayName: Loiter-sourced drift compensation gain  
-    // @Description: Gain applied to a Loiter-sourced current/wind drift sample at the moment it is written. 0 disables Loiter as a drift source entirely. 1 = full compensation, up to 2 = double compensation  
+    // @Description: Gain applied to Loiter-sourced drift samples at write-time. 0 disables this source, 1 = full, 2 = double compensation
     // @Range: 0.0 2.0  
     // @User: Advanced  
     AP_GROUPINFO("DRIFT_GAIN_LOIT", 23, AP_MotorsUGV, _drift_comp_gain_loiter, 1.0f),  
   
     // @Param: DRIFT_GAIN_NAV  
-    // @DisplayName: Guided-sourced drift compensation gain  
-    // @Description: Gain applied to a Guided-sourced current/wind drift sample at the moment it is written. 0 disables Guided as a drift source entirely. 1 = full compensation, up to 2 = double compensation  
+    // @DisplayName: Nav-sourced drift compensation gain  
+    // @Description: Gain applied to nav-mode (Auto/Guided/RTL) drift samples at write-time. 0 disables this source, 1 = full, 2 = double compensation
     // @Range: 0.0 2.0  
     // @User: Advanced  
     AP_GROUPINFO("DRIFT_GAIN_NAV", 24, AP_MotorsUGV, _drift_comp_gain_nav, 1.0f),  
   
     // @Param: DRIFT_MAXAGE    
     // @DisplayName: Drift estimate maximum age    
-    // @Description: Shared staleness cutoff common to both Loiter- and Guided-sourced drift estimates. If neither source has been updated within this many seconds, the drift correction is treated as fully expired (0 = no correction), on the assumption that the wind/current has stopped    
+    // @Description: Staleness cutoff (s) shared by both drift sources. If no estimate was updated within this time, correction expires (safety for dead estimators / long manual). 0 = never trust any estimate
     // @Units: s    
     // @Range: 0 3600    
     // @User: Advanced    
