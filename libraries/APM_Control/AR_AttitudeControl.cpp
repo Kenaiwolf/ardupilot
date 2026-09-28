@@ -577,7 +577,7 @@ const AP_Param::GroupInfo AR_AttitudeControl::var_info[] = {
     // @Param: _SPD_EXPO  
     // @DisplayName: Speed to throttle curve exponent  
     // @Description: Exponent applied to the normalised speed/cruise_speed ratio when calculating feed-forward throttle. 1.0 gives the original linear behaviour. Values above 1.0 make the curve concave, appropriate for boats where drag increases faster than linearly with speed.  
-    // @Range: 0.5 3.0  
+    // @Range: 1.0 3.0  
     // @Increment: 0.1  
     // @User: Advanced  
     AP_GROUPINFO("_SPD_EXPO", 17, AR_AttitudeControl, _speed_thr_expo, 1.0f),  

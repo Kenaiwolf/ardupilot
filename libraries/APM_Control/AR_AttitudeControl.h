@@ -116,11 +116,8 @@ public:
     float get_accel_max() const { return MAX(_throttle_accel_max, 0.0f); }
 
     // get throttle/speed controller maximum deceleration
-    float get_decel_max() const;
-	
-	// return the speed/throttle curve exponent (1.0 = linear, matches stock behaviour)  
-    float get_speed_thr_expo() const { return (_speed_thr_expo > 0.0f) ? _speed_thr_expo : 1.0f; }
-
+    float get_decel_max() const;  
+  
     // check if speed controller active
     bool speed_control_active() const;
 
