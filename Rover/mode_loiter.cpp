@@ -22,12 +22,9 @@ bool ModeLoiter::_enter()
     _drift_last_distance = rover.current_loc.get_distance(_destination);  
     _drift_rising_count = 0;  
   
-    // handoff: seed our own loiter-sourced drift estimate from whatever  
-    // Guided last measured, weighted down by how long ago it was written.  
-    // mirrors Mode::enter()'s equivalent seed from Loiter.  
-    // minimum age (ms) a source estimate must have before we trust it as a genuine  
-    // independent measurement rather than a same-tick echo written by the other  
-    // mode's own _enter() re-entering back into us during this same call chain.  
+    // handoff: seed loiter estimate from the nav-source value, weighted by age.  
+    // mirrors Mode::enter(). age >= DRIFT_SEED_MIN_AGE_MS rejects same-tick echo  
+    // written by the other mode's _enter() during this call chain.
   
     Vector2f nav_ne;    
     uint32_t nav_age_ms = 0;    
@@ -107,24 +104,14 @@ void ModeLoiter::update()
             if (ahrs.get_velocity_NED(vel_ned)) {  
                 Vector2f sample_ne{vel_ned.x, vel_ned.y};  
   
-                // Mode::calc_throttle() still applies a forward-axis feed-forward push  
-                // based on the *previous* drift estimate, even while we're coasting  
-                // here (that feed-forward is unconditional, not gated to any mode or  
-                // branch). The NED velocity we just measured therefore already  
-                // contains the effect of our own compensation. Add that contribution  
-                // back so the stored estimate reflects true environmental drift,  
-                // not "drift minus our own push".  
-                // measured coast velocity = environmental drift + our own FF push.  
-                // sample = measured - own_thrust. since Fix 8 the applied push is  
-                // the COMPENSATION vector (-drift) returned by  
-                // get_drift_compensation_body(), x>0 = forward push - so SUBTRACT  
-                // it, and only when the is_positive() guard in calc_throttle()  
-                // actually let it through  
+                // measured coast velocity = drift + own FF push. the applied push  
+                // is the -drift compensation from get_drift_compensation_body()  
+                // (x>0 = forward push, same guard as in calc_throttle) -> subtract  
                 Vector2f comp_body;  
                 if (get_drift_compensation_body(comp_body) && is_positive(comp_body.x)) {  
                     const Vector2f ff_body{comp_body.x, 0.0f};  
                     sample_ne -= ahrs.body_to_earth2D(ff_body);  
-                }    
+                }   
     
                 g2.motors.set_loiter_estimate_ne(sample_ne);   
             }    

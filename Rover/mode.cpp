@@ -50,24 +50,15 @@ bool Mode::enter()
         // clear sailboat tacking flags  
         g2.sailboat.clear_tack();  
   
-        // drift-estimate handoff: only autopilot modes (Auto/Guided/RTL/SmartRTL)  
-        // seed from whatever Loiter last measured (Loiter has its own independent slot)  
-        if (is_autopilot_mode() && (mode_number() != Number::LOITER)) {
-    // reset drift estimator window - avoids stale window spanning across mode sessions  
+        // drift handoff: autopilot modes seed from Loiter's estimate  
+        if (is_autopilot_mode() && (mode_number() != Number::LOITER)) {  
+    // reset estimator window - no stale window across mode sessions  
     _drift_est_window_start_ms = 0;  
     _drift_est_window_valid = false;  
   
-    // handoff: seed our own nav-sourced drift estimate from whatever Loiter
-    // last measured, weighted down by how long ago Loiter's value was written.  
-    // this avoids starting "cold" (0,0) every time we enter Guided, while still  
-    // never blending a live Guided sample with a live Loiter sample (they can't  
-    // run at the same time, so there is nothing to blend concurrently - this is  
-    // a one-shot seed applied only at mode entry).  
-    // minimum age (ms) a source estimate must have before we trust it as a genuine  
-    // independent measurement rather than a same-tick echo written by the other  
-    // mode's own _enter() re-entering back into us during this same call chain  
-    // (e.g. ModeGuided::_enter() -> start_loiter() -> ModeLoiter::_enter() seeding  
-    // back from the value we *just* wrote below).  order-independent guard.  
+    // one-shot seed from Loiter, age-weighted; avoids cold (0,0) start.  
+    // DRIFT_SEED_MIN_AGE_MS rejects same-tick echo (ModeGuided::_enter ->  
+    // start_loiter -> ModeLoiter::_enter seeding back what we just wrote).
   
     Vector2f loiter_ne;    
     uint32_t loiter_age_ms = 0;  
@@ -371,10 +362,8 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }
     }
 
-    // record pure navigation/PID throttle BEFORE the drift FF add and before  
-    // floor injection: the coast sampler must see true PID demand, not  
-    // demand+FF - otherwise an active estimate permanently blocks the coast  
-    // gate and method-1 can never sample while compensated  
+    // pure nav/PID throttle before drift-FF add and floor injection - the coast  
+    // sampler must see PID demand only, else an active estimate blocks the gate
     _throttle_nav_pct = throttle_out;  
   
     // forward drift/current feed-forward: added directly to throttle output,  

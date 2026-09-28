@@ -185,9 +185,9 @@ protected:
     // on things like proximity to corners and current speed
     virtual void calc_throttle(float target_speed, bool avoidance_enabled);
     
-	// retrieve a current/wind drift estimate rotated into body frame (x=forward m/s, y=right m/s).  
-    // returns false if neither source has a valid estimate.  
-    bool get_drift_compensation_body(Vector2f &drift_body) const;  
+	// drift COMPENSATION vector (-drift) in body frame: x>0 = forward thrust  
+    // needed to cancel drift. returns false if no valid estimate  
+    bool get_drift_compensation_body(Vector2f &drift_body) const;
   
     // apply drift compensation to a desired heading (centi-degrees) and speed (m/s).  
     // desired_heading_cd/desired_speed are updated in place.  no-op if no drift estimate available.  
@@ -244,18 +244,14 @@ protected:
     bool _reached_destination;  // true once the vehicle has reached the destination  
     float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter  
   
-    // timestamp (ms) of the last call to calc_steering_to_heading(); used by the  
-    // vectored-thrust steering-to-throttle floor in calc_throttle() to detect  
-    // whether a heading target is currently being commanded (must be fresh,  
-    // < 50 ms, so it auto-expires on mode switch or when a turn-rate controller  
-    // takes over - manual modes like Acro/Steering never set it)  
-   uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never  
+    // last calc_steering_to_heading() call time; steering floor in calc_throttle()  
+    // applies only while fresh (<50ms) so it auto-expires on mode switch or when  
+    // turn-rate/manual modes take over  
+    uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
   
-    // throttle output before the steering-floor is applied (i.e. the pure  
-    // nav/PID request). Written unconditionally every tick by calc_throttle(),  
-    // so it is always fresh. Used by ModeLoiter's drift sampler to detect true  
-    // coasting: get_throttle() reads the motor output AFTER the floor, which  
-    // would falsely report non-zero throttle while the boat is steering in place  
+    // nav/PID throttle demand before drift-FF add and steering-floor injection.  
+    // Fresh every tick from calc_throttle(); used by loiter drift sampler for  
+    // true-coast detection (get_throttle() reads post-floor output)  
     float _throttle_nav_pct = 0.0f;  
   
     // true while the steering-to-throttle floor is actually injecting thrust.  
