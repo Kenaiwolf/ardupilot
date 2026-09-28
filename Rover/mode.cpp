@@ -377,11 +377,20 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     if (get_drift_compensation_body(drift_body)) {  
         const float expo = attitude_control.get_speed_thr_expo();  
         const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
-        const float speed_ratio = fabsf(target_speed) / cruise_speed;  
-        const float local_slope = (g.throttle_cruise * expo / cruise_speed) * powf(MAX(speed_ratio, 0.01f), expo - 1.0f);  
-    // gain already applied at write-time - see get_drift_compensation_body()    
-        throttle_out += drift_body.x * local_slope;  
-    }  
+        const float throttle_cruise_frac = MAX(g.throttle_cruise * 0.01f, 0.01f);  
+  
+        // FF = plna nelinearna krivka vyhodnotena v |drift_body.x|, NIE lokalna  
+        // derivacia - pri target_speed=0 (loiter) je dThrottle/dv ~0 pre expo>1  
+        // a FF by sa prave v loiteri vypol. drzanie proti driftu vyzaduje  
+        // rovnaky tah ako jazda rychlostou drift_body.x. pocitane inline -  
+        // get_throttle_out_speed() je stavova PID slucka a druhe volanie v  
+        // ticku by skorumpovalo I/D termy a _desired_speed slew  
+        if (is_positive(drift_body.x)) {  
+            const float drift_ratio = drift_body.x / cruise_speed;  
+            // gain already applied at write-time - see get_drift_compensation_body()  
+            throttle_out += 100.0f * throttle_cruise_frac * powf(drift_ratio, expo);  
+        }  
+    }
   
     // record pure navigation/PID throttle before floor injection so drift    
     // samplers can detect true coasting regardless of steering-floor activity    
@@ -513,46 +522,49 @@ bool Mode::get_drift_compensation_body(Vector2f &drift_body) const
     if (!have_estimate) {
         return false;
     }
-    drift_body = AP::ahrs().earth_to_body2D(drift_ne);
+    // return the COMPENSATION vector (-drift), i.e. the own-velocity the boat  
+    // must produce to cancel the drift. x>0 = forward thrust needed, which is  
+    // exactly what the throttle FF in calc_throttle() expects  
+    drift_body = AP::ahrs().earth_to_body2D(-drift_ne);
     return true;
 }
 
 // apply drift compensation to a desired heading (centi-degrees) and speed (m/s)
-void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const  
-{  
-    // sailboats already have their own wind-relative heading logic  
-    // (Sailboat::use_indirect_route()/calc_heading(), gated on true wind direction).  
-    // For a sailboat, drift is wind-dominated, and true wind is itself computed from  
-    // apparent wind + GPS ground velocity -- i.e. the same physical quantity this  
-    // compensation estimates. Applying both would risk double-correction/windup.  
-    // Exclude sailboats entirely rather than trying to reconcile the two.  
-    if (g2.sailboat.sail_enabled()) {  
-        return;  
-    }
-    Vector2f drift_body;
-    if (!get_drift_compensation_body(drift_body)) {
-        return;
-    }
-
-    // gain applied at write-time (ModeLoiter::update() / Mode::update_drift_estimator()) 
-    // so the stored estimate is already the final calibrated correction - no further scaling here.  
-    if (drift_body.is_zero()) {  
-        return;  
-    }
-
-    // lateral component: crab-angle correction. sin(theta) = lateral / own-speed
-    // floor own-speed to the drift magnitude itself (not a small fixed constant) so that
-    // holding position against real current/wind actually commands enough forward speed
-    // to have a chance of cancelling it, rather than just avoiding a divide-by-zero.
-    // saturates (clips to +-90deg) if drift still exceeds the vehicle's achievable speed --
-    // this means the vehicle physically cannot cancel the drift at the current speed target.
-    const float speed_abs = MAX(fabsf(desired_speed), drift_body.length());
-    {
-        const float sin_theta = constrain_float(drift_body.y / speed_abs, -1.0f, 1.0f);  
-        const float crab_angle_cd = degrees(asinf(sin_theta)) * 100.0f;  
-        desired_heading_cd = wrap_360_cd(desired_heading_cd + crab_angle_cd);  
+void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const    
+{    
+    // sailboats excluded as before (their own wind-relative logic)  
+    if (g2.sailboat.sail_enabled()) {    
+        return;    
     }  
-}  
+  
+    Vector2f drift_ne;  
+    if (!g2.motors.get_current_estimate_ne(drift_ne) || drift_ne.is_zero()) {  
+        return;  
+    }  
+  
+    // kinematics: ground_vel = own_vel + drift  =>  own_vel = ground_desired - drift.  
+    // vector subtraction sets BOTH corrected heading AND corrected speed, so a  
+    // strong lateral current produces an up-current heading WITH enough throttle  
+    // (e.g. 0.8 m/s cross-current at 0.5 m/s target -> ~32deg, ~0.94 m/s),  
+    // not just a saturated crab angle at unchanged speed (old behaviour, which  
+    // could never converge when drift > desired_speed)  
+    const float des_hdg_rad = radians(desired_heading_cd * 0.01f);  
+    const Vector2f ground_desired_ne{cosf(des_hdg_rad) * desired_speed,  
+                                   sinf(des_hdg_rad) * desired_speed};  
+    const Vector2f own_required_ne = ground_desired_ne - drift_ne;  
+    if (own_required_ne.is_zero()) {  
+        return;  
+    }  
+  
+    desired_heading_cd = wrap_360_cd(degrees(atan2f(own_required_ne.y, own_required_ne.x)) * 100.0f);  
+  
+    // clamp magnitude only - direction stays optimal (up-current) even if the  
+    // required speed exceeds what the boat can do; in that case we physically  
+    // cannot hold the track, but pointing up-current at max speed is the best  
+    // achievable response  
+    const float speed_max = calc_speed_max(g.speed_cruise, 1.0f);  
+    desired_speed = MIN(own_required_ne.length(), speed_max);  
+} 
   
 // shared drift estimator - commanded vs actual NE displacement over a window  
 void Mode::update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms)  

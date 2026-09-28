@@ -24,11 +24,10 @@ bool ModeLoiter::_enter()
   
     // handoff: seed our own loiter-sourced drift estimate from whatever  
     // Guided last measured, weighted down by how long ago it was written.  
-    // mirrors ModeGuided::_enter()'s equivalent seed from Loiter.  
+    // mirrors mirrors Mode::enter()'s equivalent seed from Loiter.  
     // minimum age (ms) a source estimate must have before we trust it as a genuine  
     // independent measurement rather than a same-tick echo written by the other  
     // mode's own _enter() re-entering back into us during this same call chain.  
-    // mirrors ModeGuided::_enter()'s equivalent guard.  order-independent.  
   
     Vector2f nav_ne;    
     uint32_t nav_age_ms = 0;    
@@ -136,11 +135,14 @@ void ModeLoiter::update()
         // thrust needed to hold position against environmental drift.  
         // equilibrium = commanded ~0, actual ~0, error small.  
         const AP_PIDInfo& tinfo = attitude_control.get_throttle_speed_pid_info();  
-        const bool pid_at_equilibrium = is_zero(_desired_speed) &&    
-                                        !_steer_floor_active &&    
-                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&    
-                                        fabsf(tinfo.error) <= g2.motors.get_loit_i_eq_err_mps() &&    
-                                        fabsf(tinfo.I) >= g2.motors.get_loit_i_min(); 
+        // equilibrium = platné meracie okno (bez podmienky na |I| - nulový I  
+        // je legitimna vzorka, znamena "namerany drift = 0", nie "ziadna vzorka")  
+        const bool pid_in_equilibrium_window = is_zero(_desired_speed) &&  
+                                        !_steer_floor_active &&  
+                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&  
+                                        fabsf(tinfo.error) <= g2.motors.get_loit_i_eq_err_mps();  
+        const bool pid_at_equilibrium = pid_in_equilibrium_window &&  
+                                        fabsf(tinfo.I) >= g2.motors.get_loit_i_min();
         if (pid_at_equilibrium) {  
             const float i_mag = fabsf(tinfo.I);  
             if (!_drift_i_filt_valid) {  
@@ -155,9 +157,22 @@ void ModeLoiter::update()
             const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
             const float cruise_thr = MAX(g.throttle_cruise * 0.01f, 0.01f);  
             const float expo = attitude_control.get_speed_thr_expo();  
-            // clamp: if filtered I exceeds cruise throttle the powf() above    
-            // would extrapolate beyond the calibrated curve - cap at cruise    
-            const float drift_mag_mps = MIN(cruise_speed * powf(_drift_i_filt / cruise_thr, 1.0f / expo), cruise_speed);
+  
+            // add back the drift FF currently applied by calc_throttle (mode.cpp).  
+            // I-term only holds the RESIDUAL after FF - without this a fully  
+            // compensated real drift reads as I~0 and the zero-sample path would  
+            // erase a correct estimate. FF was computed as the full curve value  
+            // at the estimate's forward body component, so its throttle  
+            // equivalent is reconstructed the same way  
+            Vector2f prev_body;  
+            float ff_frac = 0.0f;  
+            if (get_drift_compensation_body(prev_body) && is_positive(prev_body.x)) {  
+                ff_frac = cruise_thr * powf(prev_body.x / cruise_speed, expo);  
+            }  
+  
+            // clamp: if (I + FF) exceeds cruise throttle the powf() above  
+            // would extrapolate beyond the calibrated curve - cap at cruise  
+            const float drift_mag_mps = MIN(cruise_speed * powf((_drift_i_filt + ff_frac) / cruise_thr, 1.0f / expo), cruise_speed);
   
             // direction: the I-term holds position AGAINST the drift, so drift  
             // points opposite to the thrust direction. thrust direction is  
@@ -165,32 +180,50 @@ void ModeLoiter::update()
             // existing estimate's direction if we have one (it is updated by  
             // method-1 coast samples), otherwise the measured velocity  
             // direction if the boat is still sliding slightly.  
-            Vector2f est_dir_ne;    
-            Vector2f prev_ne;    
-            if (g2.motors.get_current_estimate_ne(prev_ne) && prev_ne.length_squared() > sq(0.01f)) {    
-                // best source: direction of the existing estimate (updated by    
-                // method-1 coast samples)    
-                est_dir_ne = prev_ne.normalized();    
-            } else {    
-                // fallback 1: residual velocity direction while still sliding    
-                Vector3f vel_ned;    
-                if (ahrs.get_velocity_NED(vel_ned)) {    
-                    const Vector2f v_ne{vel_ned.x, vel_ned.y};    
-                    if (v_ne.length_squared() > sq(0.02f)) {    
-                        est_dir_ne = v_ne.normalized();    
-                    }    
-                }    
-            }    
-            if (est_dir_ne.is_zero()) {    
-                // fallback 2 (first-ever sample, boat already at standstill):    
-                // drift points opposite the actual thrust vector. thrust dir in    
-                // earth frame = yaw + thruster steering angle    
-                const float steer_ang_rad = radians(g2.motors.get_steering() / 4500.0f)    
-                                            * radians(g2.motors.get_vector_angle_max());    
-                const float thrust_rad = ahrs.get_yaw_rad() + steer_ang_rad;    
-                // drift vector = opposite of the force that holds us in place    
-                est_dir_ne = Vector2f{-cosf(thrust_rad), -sinf(thrust_rad)};    
-            } 
+            // direction: measured EVERY tick, same as magnitude. the previous  
+            // estimate is only a weighted prior so a noisy first measurement  
+            // doesn't swing the estimate - but a real direction change must  
+            // converge, never stay locked on the old heading  
+            Vector2f meas_dir_ne;  
+            {  
+                // source 1: residual velocity direction while still sliding  
+                Vector3f vel_ned;  
+                if (ahrs.get_velocity_NED(vel_ned)) {  
+                    const Vector2f v_ne{vel_ned.x, vel_ned.y};  
+                    if (v_ne.length_squared() > sq(0.02f)) {  
+                        meas_dir_ne = v_ne.normalized();  
+                    }  
+                }  
+            }  
+            if (meas_dir_ne.is_zero()) {  
+                // source 2 (boat fully at standstill): drift points opposite the  
+                // actual thrust vector. thrust dir in earth frame = yaw + thruster  
+                // steering angle. get_steering() is centideg (+/-4500) -  
+                // normalise to -1..1 first, THEN multiply by max angle in radians  
+                const float steer_ang_rad = (g2.motors.get_steering() / 4500.0f)  
+                                            * radians(g2.motors.get_vector_angle_max());  
+                const float thrust_rad = ahrs.get_yaw_rad() + steer_ang_rad;  
+                // drift vector = opposite of the force that holds us in place  
+                meas_dir_ne = Vector2f{-cosf(thrust_rad), -sinf(thrust_rad)};  
+            }  
+  
+            Vector2f est_dir_ne = meas_dir_ne;  
+            Vector2f prev_ne;  
+            if (g2.motors.get_current_estimate_ne(prev_ne) &&  
+                prev_ne.length_squared() > sq(0.01f)) {  
+                // prev direction is a prior with weight 0.65, fresh measurement  
+                // has 0.35 - converges within a few ticks on real changes,  
+                // still damps single-tick noise  
+                est_dir_ne = meas_dir_ne * 0.35f + prev_ne.normalized() * 0.65f;  
+                if (est_dir_ne.is_zero()) {  
+                    // near-opposite vectors cancelled out - trust the fresh  
+                    // measurement (a ~180deg flip is exactly the case where the  
+                    // old direction was wrong)  
+                    est_dir_ne = meas_dir_ne;  
+                } else {  
+                    est_dir_ne.normalize();  
+                }  
+            }  
   
             if (!est_dir_ne.is_zero()) {  
                 Vector2f new_est = est_dir_ne * drift_mag_mps;  
@@ -203,13 +236,30 @@ void ModeLoiter::update()
                     }  
                 }  
                 g2.motors.set_loiter_estimate_ne(new_est);  
+            }
+        } else if (pid_in_equilibrium_window) {  
+            // meracie okno platne ale |I| pod sumovym prahom = drift sa realne  
+            // nameria ako ~0. drz to vsetko niekolko tickov aby to nebol nahodny  
+            // prechod, potom zapis nulovu vzorku - bez nej by sa stary odhad  
+            // "zasekol" az do DRIFT_MAXAGE ked vietor/prud zhasne  
+            if (++_drift_zero_count >= LOITER_DRIFT_ZERO_TICKS) {  
+                Vector2f prev_ne;  
+                Vector2f zero_est{0.0f, 0.0f};  
+                if (g2.motors.get_current_estimate_ne(prev_ne) && !prev_ne.is_zero()) {  
+                    // disagreement-blend aj pri ceste k nule, rovnako ako pri  
+                    // normalnych vzorkach - nie skokovy reset  
+                    zero_est = prev_ne * 0.75f;  
+                }  
+                g2.motors.set_loiter_estimate_ne(zero_est);  
             }  
-        } else {  
-            // PID left equilibrium (still decelerating hard, or already  
-            // stopped with I reset) - decay validity so a stale filtered  
-            // value isn't reused after conditions change  
             _drift_i_filt_valid = false;  
-        }  
+        } else {    
+            // PID left equilibrium (still decelerating hard, or already    
+            // stopped with I reset) - decay validity so a stale filtered    
+            // value isn't reused after conditions change    
+            _drift_i_filt_valid = false;  
+            _drift_zero_count = 0;  
+        }
     } else {  
         _drift_rising_count = 0;  
         // P controller with hard-coded gain to convert distance to desired speed  
