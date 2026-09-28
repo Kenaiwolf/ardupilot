@@ -371,9 +371,15 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }
     }
 
-    // forward drift/current feed-forward: added directly to throttle output,
-    // never to target_speed, so it doesn't shift the PID's ground-speed setpoint
-    Vector2f drift_body;  
+    // record pure navigation/PID throttle BEFORE the drift FF add and before  
+    // floor injection: the coast sampler must see true PID demand, not  
+    // demand+FF - otherwise an active estimate permanently blocks the coast  
+    // gate and method-1 can never sample while compensated  
+    _throttle_nav_pct = throttle_out;  
+  
+    // forward drift/current feed-forward: added directly to throttle output,  
+    // never to target_speed, so it doesn't shift the PID's ground-speed setpoint  
+    Vector2f drift_body;    
     if (get_drift_compensation_body(drift_body)) {  
         const float expo = attitude_control.get_speed_thr_expo();  
         const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
@@ -392,10 +398,6 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }  
     }
   
-    // record pure navigation/PID throttle before floor injection so drift    
-    // samplers can detect true coasting regardless of steering-floor activity    
-    _throttle_nav_pct = throttle_out;    
-    
     // steering-to-throttle floor and runaway prevention (vectored-thrust safety  
     // fix). yaw_error_* and steer_i_freeze were computed above, before the PID  
     // calls, so the I-term freeze already reached the controller this tick  
@@ -548,11 +550,16 @@ void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_sp
     // (e.g. 0.8 m/s cross-current at 0.5 m/s target -> ~32deg, ~0.94 m/s),  
     // not just a saturated crab angle at unchanged speed (old behaviour, which  
     // could never converge when drift > desired_speed)  
+    const bool reversing = (desired_speed < 0.0f);  
     const float des_hdg_rad = radians(desired_heading_cd * 0.01f);  
     const Vector2f ground_desired_ne{cosf(des_hdg_rad) * desired_speed,  
                                    sinf(des_hdg_rad) * desired_speed};  
     const Vector2f own_required_ne = ground_desired_ne - drift_ne;  
-    if (own_required_ne.is_zero()) {  
+    if (own_required_ne.length_squared() < sq(0.05f)) {  
+        // drift alone already delivers the desired ground track - command zero  
+        // own speed and face up-drift so a drift change is caught immediately  
+        desired_heading_cd = wrap_360_cd(degrees(atan2f(-drift_ne.y, -drift_ne.x)) * 100.0f);  
+        desired_speed = 0.0f;  
         return;  
     }  
   
@@ -564,7 +571,14 @@ void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_sp
     // achievable response  
     const float speed_max = calc_speed_max(g.speed_cruise, 1.0f);  
     desired_speed = MIN(own_required_ne.length(), speed_max);  
-} 
+  
+    // reversing modes: flip heading 180deg and negate speed - identical ground  
+    // vector, keeps the reversed convention agnostic  
+    if (reversing) {  
+        desired_heading_cd = wrap_360_cd(desired_heading_cd + 18000.0f);  
+        desired_speed = -desired_speed;  
+    }  
+}
   
 // shared drift estimator - commanded vs actual NE displacement over a window  
 void Mode::update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms)  

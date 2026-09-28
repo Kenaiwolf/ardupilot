@@ -24,7 +24,7 @@ bool ModeLoiter::_enter()
   
     // handoff: seed our own loiter-sourced drift estimate from whatever  
     // Guided last measured, weighted down by how long ago it was written.  
-    // mirrors mirrors Mode::enter()'s equivalent seed from Loiter.  
+    // mirrors Mode::enter()'s equivalent seed from Loiter.  
     // minimum age (ms) a source estimate must have before we trust it as a genuine  
     // independent measurement rather than a same-tick echo written by the other  
     // mode's own _enter() re-entering back into us during this same call chain.  
@@ -114,15 +114,16 @@ void ModeLoiter::update()
                 // contains the effect of our own compensation. Add that contribution  
                 // back so the stored estimate reflects true environmental drift,  
                 // not "drift minus our own push".  
-                Vector2f prev_estimate_ne;    
-                if (g2.motors.get_current_estimate_ne(prev_estimate_ne)) {    
-                    // prev_estimate_ne is already the final, gain-applied vector that  
-                    // Mode::calc_throttle() actually fed into its forward feed-forward  
-                    // term (gain is now baked in at write-time, not read-time), so add  
-                    // it back directly without a second gain multiply.  
-                    const Vector2f prev_estimate_body = ahrs.earth_to_body2D(prev_estimate_ne);    
-                    const Vector2f ff_body{prev_estimate_body.x, 0.0f};    
-                    sample_ne += ahrs.body_to_earth2D(ff_body);    
+                // measured coast velocity = environmental drift + our own FF push.  
+                // sample = measured - own_thrust. since Fix 8 the applied push is  
+                // the COMPENSATION vector (-drift) returned by  
+                // get_drift_compensation_body(), x>0 = forward push - so SUBTRACT  
+                // it, and only when the is_positive() guard in calc_throttle()  
+                // actually let it through  
+                Vector2f comp_body;  
+                if (get_drift_compensation_body(comp_body) && is_positive(comp_body.x)) {  
+                    const Vector2f ff_body{comp_body.x, 0.0f};  
+                    sample_ne -= ahrs.body_to_earth2D(ff_body);  
                 }    
     
                 g2.motors.set_loiter_estimate_ne(sample_ne);   
@@ -144,7 +145,8 @@ void ModeLoiter::update()
         const bool pid_at_equilibrium = pid_in_equilibrium_window &&  
                                         fabsf(tinfo.I) >= g2.motors.get_loit_i_min();
         if (pid_at_equilibrium) {  
-            const float i_mag = fabsf(tinfo.I);  
+            _drift_zero_count = 0;  // nonzero-I path - cancel pending zero window  
+            const float i_mag = fabsf(tinfo.I); 
             if (!_drift_i_filt_valid) {  
                 _drift_i_filt = i_mag;  
                 _drift_i_filt_valid = true;  
@@ -260,9 +262,10 @@ void ModeLoiter::update()
             _drift_i_filt_valid = false;  
             _drift_zero_count = 0;  
         }
-    } else {  
+    } else {    
         _drift_rising_count = 0;  
-        // P controller with hard-coded gain to convert distance to desired speed  
+        _drift_zero_count = 0;  
+        // P controller with hard-coded gain to convert distance to desired speed
         _desired_speed = MIN((_distance_to_destination - loiter_radius) * g2.loiter_speed_gain, g2.wp_nav.get_default_speed());  
   
         // calculate bearing to destination  
