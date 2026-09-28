@@ -201,7 +201,7 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @Units: %/deg    
     // @Range: 0 5    
     // @User: Advanced    
-    AP_GROUPINFO("SFL_GAIN", 27, AP_MotorsUGV, _sfl_gain, 0.5f),  
+    AP_GROUPINFO("SFL_GAIN", 27, AP_MotorsUGV, _sfl_gain, 0.7f),  
   
     // @Param: SFL_MAX    
     // @DisplayName: Steering-floor maximum    
@@ -354,16 +354,29 @@ bool AP_MotorsUGV::get_current_estimate_ne(Vector2f &current_ne) const
         return false;  
     }  
   
-    const bool use_loiter = loiter_age_ms <= nav_age_ms;  
-    const uint32_t chosen_age_ms = use_loiter ? loiter_age_ms : nav_age_ms;
+    // a seeded estimate is only a handoff placeholder, not a real measurement -  
+    // a genuinely-measured estimate always wins over a seeded one regardless  
+    // of timestamp. between two seeds or two real samples, newer wins.  
+    const bool loiter_real = (loiter_age_ms != UINT32_MAX) && !_loiter_estimate_is_seeded;  
+    const bool nav_real    = (nav_age_ms    != UINT32_MAX) && !_nav_estimate_is_seeded;  
   
-    if (!is_positive(_drift_max_age_s) || (chosen_age_ms > uint32_t(_drift_max_age_s * 1000.0f))) {  
-        // shared staleness cutoff: neither source is recent enough to trust  
-        return false;  
+    bool use_loiter;  
+    if (loiter_real && !nav_real) {  
+        use_loiter = true;  
+    } else if (nav_real && !loiter_real) {  
+        use_loiter = false;  
+    } else {  
+        use_loiter = loiter_age_ms <= nav_age_ms;  
     }  
+    const uint32_t chosen_age_ms = use_loiter ? loiter_age_ms : nav_age_ms;  
   
-    current_ne = use_loiter ? _loiter_estimate_ne : _nav_estimate_ne;  
-    return true;  
+    if (!is_positive(_drift_max_age_s) || (chosen_age_ms > uint32_t(_drift_max_age_s * 1000.0f))) {    
+        // shared staleness cutoff: neither source is recent enough to trust    
+        return false;    
+    }    
+    
+    current_ne = use_loiter ? _loiter_estimate_ne : _nav_estimate_ne;    
+    return true;
 }
 
 void AP_MotorsUGV::init(uint8_t frtype)
