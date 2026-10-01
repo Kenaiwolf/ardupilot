@@ -97,30 +97,34 @@ void GCS_MAVLINK_Rover::send_nav_controller_output() const
         control_mode->crosstrack_error_m());  
   
     // drift/current estimate as named floats for live GCS graphing.  
-    // send_named_float broadcasts to all channels AND auto-writes an NVF  
-    // record to DataFlash - this covers both live verification and the log.  
+    // send_named_float broadcasts to ALL channels (send_to_active_channels),  
+    // while this function runs once per channel - gate to MAVLINK_COMM_0 so  
+    // each value is sent exactly once regardless of link count. Also  
+    // auto-writes an NVF record to DataFlash.  
     // get_current_estimate_ne returns false when the estimate is stale, so  
     // nothing is sent outside modes where the estimator runs.  
-    Vector2f drift_ne{};    
-    if (rover.g2.motors.get_current_estimate_ne(drift_ne)) {    
-        gcs().send_named_float("DRIFTN", drift_ne.x);    
-        gcs().send_named_float("DRIFTE", drift_ne.y);    
-        gcs().send_named_float("DRIFTSPD", drift_ne.length());    
-    }    
-    // per-slot diagnostics: age tells whether sampling is alive (age rising    
-    // = gate blocking samples, e.g. during pivot turns), seeded tells whether    
-    // the estimate came from a mode-entry seed or from real samples  
-    Vector2f slot_ne{};    
-    uint32_t slot_age_ms = 0;    
-    bool slot_seeded = false;    
-    if (rover.g2.motors.get_nav_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {    
-        gcs().send_named_float("DRIFTNAGE", slot_age_ms * 0.001f);    
-        gcs().send_named_float("DRIFTNSED", slot_seeded ? 1.0f : 0.0f);    
-    }    
-    if (rover.g2.motors.get_loiter_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {    
-        gcs().send_named_float("DRIFTLAGE", slot_age_ms * 0.001f);    
-        gcs().send_named_float("DRIFTLSED", slot_seeded ? 1.0f : 0.0f);    
-    }    
+    if (chan == MAVLINK_COMM_0) {  
+        Vector2f drift_ne{};  
+        if (rover.g2.motors.get_current_estimate_ne(drift_ne)) {  
+            gcs().send_named_float("DRIFTN", drift_ne.x);  
+            gcs().send_named_float("DRIFTE", drift_ne.y);  
+            gcs().send_named_float("DRIFTSPD", drift_ne.length());  
+        }  
+        // per-slot diagnostics: age tells whether sampling is alive (age rising  
+        // = gate blocking samples, e.g. during pivot turns), seeded tells  
+        // whether the estimate came from a mode-entry seed or from real samples  
+        Vector2f slot_ne{};  
+        uint32_t slot_age_ms = 0;  
+        bool slot_seeded = false;  
+        if (rover.g2.motors.get_nav_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {  
+            gcs().send_named_float("DRIFTNAGE", slot_age_ms * 0.001f);  
+            gcs().send_named_float("DRIFTNSED", slot_seeded ? 1.0f : 0.0f);  
+        }  
+        if (rover.g2.motors.get_loiter_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {  
+            gcs().send_named_float("DRIFTLAGE", slot_age_ms * 0.001f);  
+            gcs().send_named_float("DRIFTLSED", slot_seeded ? 1.0f : 0.0f);  
+        }  
+    }  
 }
 
 int16_t GCS_MAVLINK_Rover::vfr_hud_throttle() const

@@ -727,8 +727,8 @@ protected:
     // current/wind drift-estimate detection state  
     static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample    
     static constexpr uint8_t LOITER_DRIFT_ZERO_TICKS   = 5;      // consecutive in-window ticks with |I| below noise floor before a zero-drift sample is accepted
-	// LOITER_DRIFT_ROT_ANG_DEG moved to LOIT_ROT_ANG parameter (tunable via GCS)
-	// LOITER_DRIFT_ROT_RATE_DGS moved to LOIT_ROT_RATE  parameter (tunable via GCS)
+    // LOITER_DRIFT_ROT_ANG_DEG moved to LOIT_ROT_ANG parameter (tunable via GCS)
+    // LOITER_DRIFT_ROT_RATE_DGS moved to LOIT_ROT_RATE  parameter (tunable via GCS)
 
   
     // method-2 sampling state: filtered I-term magnitude while the speed PID  

@@ -52,25 +52,25 @@ bool Mode::enter()
   
         // drift handoff: autopilot modes seed from Loiter's estimate  
         if (is_autopilot_mode() && (mode_number() != Number::LOITER)) {  
-    // reset estimator window - no stale window across mode sessions  
-    _drift_est_window_start_ms = 0;  
-    _drift_est_window_valid = false;  
+            // reset estimator window - no stale window across mode sessions  
+            _drift_est_window_start_ms = 0;  
+            _drift_est_window_valid = false;  
   
-    // one-shot seed from Loiter, age-weighted; avoids cold (0,0) start.  
-    // DRIFT_SEED_MIN_AGE_MS rejects same-tick echo (ModeGuided::_enter ->  
-    // start_loiter -> ModeLoiter::_enter seeding back what we just wrote).
+            // one-shot seed from Loiter, age-weighted; avoids cold (0,0) start.  
+            // DRIFT_SEED_MIN_AGE_MS rejects same-tick echo (ModeGuided::_enter ->  
+            // start_loiter -> ModeLoiter::_enter seeding back what we just wrote).
   
-    Vector2f loiter_ne;    
-    uint32_t loiter_age_ms = 0;  
-    bool loiter_is_seeded = false;  
-    if (g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
-        !loiter_is_seeded && (loiter_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&
-        (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
-        const float age_s = loiter_age_ms * 0.001f;    
-        const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
-        const float seed_weight = constrain_float(1.0f - (age_s / max_age_s), 0.0f, 1.0f);    
-        g2.motors.seed_nav_estimate_ne(loiter_ne * seed_weight, AP_HAL::millis() - loiter_age_ms);  
-    }  
+            Vector2f loiter_ne;    
+            uint32_t loiter_age_ms = 0;  
+            bool loiter_is_seeded = false;  
+            if (g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
+                !loiter_is_seeded && (loiter_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&
+                (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
+                const float age_s = loiter_age_ms * 0.001f;    
+                const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
+                const float seed_weight = constrain_float(1.0f - (age_s / max_age_s), 0.0f, 1.0f);    
+                g2.motors.seed_nav_estimate_ne(loiter_ne * seed_weight, AP_HAL::millis() - loiter_age_ms);  
+            }  
         }  
     }  
   
