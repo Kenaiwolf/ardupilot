@@ -177,8 +177,11 @@ void ModeLoiter::update()
             }  
   
             // clamp: if (I + FF) exceeds cruise throttle the powf() above  
-            // would extrapolate beyond the calibrated curve - cap at cruise  
-            const float drift_mag_mps = MIN(cruise_speed * powf((_drift_i_filt + ff_frac) / cruise_thr, 1.0f / expo), cruise_speed);
+            // would extrapolate beyond the calibrated curve - cap at the  
+            // full-throttle speed ceiling, not cruise_speed, so currents  
+            // stronger than cruise are still representable  
+            const float drift_mag_mps = MIN(cruise_speed * powf((_drift_i_filt + ff_frac) / cruise_thr, 1.0f / expo),  
+                                            calc_speed_max(g.speed_cruise, 1.0f));
   
             // direction: the I-term holds position AGAINST the drift, so drift  
             // points opposite to the thrust direction. thrust direction is  

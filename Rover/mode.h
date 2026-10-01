@@ -242,7 +242,9 @@ protected:
     // private members for waypoint navigation  
     float _distance_to_destination; // straight-line distance from vehicle to final destination in meters  
     bool _reached_destination;  // true once the vehicle has reached the destination  
-    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter    
+    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used by every mode  
+                                // calling calc_steering_to_heading(): Auto, Guided,  
+                                // Loiter, Simple and Follow      
   
     // heading target actually passed to the heading controller by the last    
     // calc_steering_to_heading() call (may include drift compensation). kept    
@@ -252,9 +254,10 @@ protected:
     // calc_throttle() uses THIS for the vectored-thrust floor yaw error.    
     float _steering_target_yaw_cd = 0.0f;    
   
-    // last calc_steering_to_heading() call time; steering floor in calc_throttle()
-    // applies only while fresh (<50ms) so it auto-expires on mode switch or when  
-    // turn-rate/manual modes take over  
+    // last calc_steering_to_heading() call time; the steering floor and cosine  
+    // throttle reduction in calc_throttle() apply to ALL heading-driven modes  
+    // (Auto/Guided/Loiter/Simple/Follow) while fresh (<50ms), so they  
+    // auto-expire on mode switch or when turn-rate/manual modes take over 
     uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
   
     // nav/PID throttle demand before drift-FF add and steering-floor injection.  
