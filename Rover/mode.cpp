@@ -334,7 +334,7 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     const bool steering_heading_fresh = _steering_heading_active_ms != 0 &&  
         (AP_HAL::millis() - _steering_heading_active_ms) < 50;  
     if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
-        yaw_error_rad = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);  
+        yaw_error_rad = wrap_180_cd(_steering_target_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);
         yaw_error_deg = fabsf(degrees(yaw_error_rad));  
         steer_i_freeze = yaw_error_deg > g2.motors.get_steer_floor_ifreeze_deg();  
     }  
@@ -366,36 +366,43 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     // sampler must see PID demand only, else an active estimate blocks the gate
     _throttle_nav_pct = throttle_out;  
   
-    // forward drift/current feed-forward: added directly to throttle output,  
-    // never to target_speed, so it doesn't shift the PID's ground-speed setpoint  
-    Vector2f drift_body;    
-    if (get_drift_compensation_body(drift_body)) {  
-        const float expo = attitude_control.get_speed_thr_expo();  
-        const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
-        const float throttle_cruise_frac = MAX(g.throttle_cruise * 0.01f, 0.01f);  
+    // steering-to-throttle floor and runaway prevention (vectored-thrust safety    
+    // fix). yaw_error_* and steer_i_freeze were computed above, before the PID    
+    // calls, so the I-term freeze already reached the controller this tick.    
+    // NOTE: cosine reduction runs on the PID part only - drift-FF is added    
+    // AFTER it below, otherwise FF would be zeroed exactly at large crab    
+    // angles where drift-hold needs it most    
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {    
+    
+        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error      
+        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
+    }  
   
-        // FF = plna nelinearna krivka vyhodnotena v |drift_body.x|, NIE lokalna  
-        // derivacia - pri target_speed=0 (loiter) je dThrottle/dv ~0 pre expo>1  
-        // a FF by sa prave v loiteri vypol. drzanie proti driftu vyzaduje  
-        // rovnaky tah ako jazda rychlostou drift_body.x. pocitane inline -  
-        // get_throttle_out_speed() je stavova PID slucka a druhe volanie v  
-        // ticku by skorumpovalo I/D termy a _desired_speed slew  
-        if (is_positive(drift_body.x)) {  
-            const float drift_ratio = drift_body.x / cruise_speed;  
-            // gain already applied at write-time - see get_drift_compensation_body()  
-            throttle_out += 100.0f * throttle_cruise_frac * powf(drift_ratio, expo);  
-        }  
-    }
+    // forward drift/current feed-forward: added directly to throttle output,    
+    // never to target_speed, so it doesn't shift the PID's ground-speed setpoint.    
+    // placed AFTER cosine reduction so a large crab angle does not erase the    
+    // exact thrust needed to hold position against drift    
+    Vector2f drift_body;      
+    if (get_drift_compensation_body(drift_body)) {    
+        const float expo = attitude_control.get_speed_thr_expo();    
+        const float cruise_speed = MAX(g.speed_cruise, 0.1f);    
+        const float throttle_cruise_frac = MAX(g.throttle_cruise * 0.01f, 0.01f);    
+    
+        // FF = plna nelinearna krivka vyhodnotena v |drift_body.x|, NIE lokalna    
+        // derivacia - pri target_speed=0 (loiter) je dThrottle/dv ~0 pre expo>1    
+        // a FF by sa prave v loiteri vypol. drzanie proti driftu vyzaduje    
+        // rovnaky tah ako jazda rychlostou drift_body.x. pocitane inline -    
+        // get_throttle_out_speed() je stavova PID slucka a druhe volanie v    
+        // ticku by skorumpovalo I/D termy a _desired_speed slew    
+        if (is_positive(drift_body.x)) {    
+            const float drift_ratio = drift_body.x / cruise_speed;    
+            // gain already applied at write-time - see get_drift_compensation_body()    
+            throttle_out += 100.0f * throttle_cruise_frac * powf(drift_ratio, expo);    
+        }    
+    }    
   
-    // steering-to-throttle floor and runaway prevention (vectored-thrust safety  
-    // fix). yaw_error_* and steer_i_freeze were computed above, before the PID  
-    // calls, so the I-term freeze already reached the controller this tick  
     if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
-  
-        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error    
-        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));
-  
-        // 2. Steering Thrust Floor: force minimum throttle to allow rotation  
+        // 2. Steering Thrust Floor: force minimum throttle to allow rotation
         if (yaw_error_deg > g2.motors.get_steer_floor_deadband_deg()) {
             const float steer_throttle_floor = constrain_float(    
                 (yaw_error_deg - g2.motors.get_steer_floor_deadband_deg()) * g2.motors.get_steer_floor_gain(),    
@@ -575,7 +582,9 @@ void Mode::update_drift_estimator(float commanded_heading_cd, float commanded_sp
     const uint32_t now_ms = AP_HAL::millis();  
   
     // gate: only accumulate while conditions are steady enough to trust sample  
-    const bool yaw_rate_ok = fabsf(degrees(ahrs.get_yaw_rate_earth())) < DRIFT_EST_MAX_YAW_RATE_DPS;  
+    const float max_yaw_rate_dps = g2.motors.get_drift_est_yaw_rate_dps();  
+    const bool yaw_rate_ok = (max_yaw_rate_dps <= 0.0f) ||  
+        fabsf(degrees(ahrs.get_yaw_rate_earth())) < max_yaw_rate_dps;
     Vector2p current_pos_ne;  
     const bool pos_ok = ahrs.get_relative_position_NE_origin(current_pos_ne);  
     const bool gate_ok = yaw_rate_ok && pos_ok;  
@@ -775,12 +784,13 @@ void Mode::calc_steering_from_lateral_acceleration(float lat_accel, bool reverse
 // rate_max is a maximum turn rate in deg/s.  set to zero to use default turn rate limits
 void Mode::calc_steering_to_heading(float desired_heading_cd, float rate_max_degs)  
 {  
-    // record the heading target and timestamp so calc_throttle() can compute a  
-    // trustworthy yaw error for the vectored-thrust steering floor. writing  
-    // _desired_yaw_cd here (not only in mode update() bodies) keeps it correct  
-    // for callers that use a local heading target (e.g. ModeSimple).  
-    _desired_yaw_cd = desired_heading_cd;  
-    _steering_heading_active_ms = AP_HAL::millis();  
+    // record the heading target and timestamp so calc_throttle() can compute a    
+    // trustworthy yaw error for the vectored-thrust steering floor. write to    
+    // the dedicated _steering_target_yaw_cd (NOT _desired_yaw_cd) so callers    
+    // holding the persistent commanded target there (Guided HeadingAndSpeed)    
+    // are not corrupted by a drift-compensated heading value.    
+    _steering_target_yaw_cd = desired_heading_cd;    
+    _steering_heading_active_ms = AP_HAL::millis();
   
     // call heading controller  
     const float steering_out = attitude_control.get_steering_out_heading(radians(desired_heading_cd*0.01f),

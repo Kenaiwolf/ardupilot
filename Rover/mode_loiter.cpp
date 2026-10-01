@@ -19,8 +19,11 @@ bool ModeLoiter::_enter()
     // loiter session doesn't leak into this one.  Compute distance fresh
     // against the just-set _destination rather than reusing whatever the
     // previous mode last left in _distance_to_destination.
-    _drift_last_distance = rover.current_loc.get_distance(_destination);  
-    _drift_rising_count = 0;  
+    _drift_last_distance = rover.current_loc.get_distance(_destination);    
+    _drift_rising_count = 0;    
+    _drift_zero_count = 0;    
+    _drift_i_filt_valid = false;    
+    _inside_loiter_circle = false;
   
     // handoff: seed loiter estimate from the nav-source value, weighted by age.  
     // mirrors Mode::enter(). age >= DRIFT_SEED_MIN_AGE_MS rejects same-tick echo  
@@ -97,9 +100,23 @@ void ModeLoiter::update()
         // gate on the pre-floor PID demand, not the motor output: the  
         // steering-to-throttle floor can hold real thrust while the PID is  
         // requesting zero, which would falsely disqualify a true coast  
-        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&    
-            fabsf(_throttle_nav_pct) < g2.motors.get_loit_coast_thr_pct() &&    
-            !_steer_floor_active) {
+        // rotation gate: a deflected vectored thruster rotates the hull about  
+        // its pivot (~0.6m radius at 90deg), producing lateral IMU velocity  
+        // r*L_pivot (up to ~0.5m/s at 45deg/s) that is NOT drift. the single  
+        // bow thruster can never translate the hull sideways, so any measured  
+        // lateral velocity while NOT rotating is pure drift. block sampling  
+        // during rotation - detected by thruster deflection (cause) and yaw  
+        // rate (effect), both direct measurements, no estimation.  
+        const float vec_angle_deg = fabsf(degrees(g2.motors.get_vectored_angle_rad()));  
+        const float yaw_rate_degs = fabsf(degrees(ahrs.get_gyro().z));  
+        const float rot_ang_deg = g2.motors.get_loit_rot_ang_deg();  
+        const float rot_rate_dps = g2.motors.get_loit_rot_rate_dps();  
+        const bool rotating = (rot_ang_deg > 0.0f && vec_angle_deg > rot_ang_deg) ||  
+                              (rot_rate_dps > 0.0f && yaw_rate_degs > rot_rate_dps);
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&      
+            fabsf(_throttle_nav_pct) < g2.motors.get_loit_coast_thr_pct() &&      
+            !_steer_floor_active &&  
+            !rotating) {
             Vector3f vel_ned;  
             if (ahrs.get_velocity_NED(vel_ned)) {  
                 Vector2f sample_ne{vel_ned.x, vel_ned.y};  
@@ -153,10 +170,10 @@ void ModeLoiter::update()
             // erase a correct estimate. FF was computed as the full curve value  
             // at the estimate's forward body component, so its throttle  
             // equivalent is reconstructed the same way  
-            Vector2f prev_body;  
+            Vector2f comp_body;  
             float ff_frac = 0.0f;  
-            if (get_drift_compensation_body(prev_body) && is_positive(prev_body.x)) {  
-                ff_frac = cruise_thr * powf(prev_body.x / cruise_speed, expo);  
+            if (get_drift_compensation_body(comp_body) && is_positive(comp_body.x)) {  
+                ff_frac = cruise_thr * powf(comp_body.x / cruise_speed, expo);  
             }  
   
             // clamp: if (I + FF) exceeds cruise throttle the powf() above  

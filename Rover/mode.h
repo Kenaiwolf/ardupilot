@@ -195,17 +195,17 @@ protected:
   
     // drift estimator shared by all modes via navigate_to_waypoint() and Guided  
     static constexpr float DRIFT_EST_WINDOW_S = 20.0f;           // window length (s)  
-    static constexpr float DRIFT_EST_MAX_YAW_RATE_DPS = 5.0f;  
+    // DRIFT_EST_MAX_YAW_RATE_DPS moved to MOT_DRIFT_EST_YAWR parameter (tunable via GCS)
     static constexpr uint32_t DRIFT_EST_MAX_GAP_MS = 200; // max tick gap before window is stale  
     static constexpr uint32_t DRIFT_SEED_MIN_AGE_MS = 50; // min age (ms) a source estimate must have before it can be used to seed another mode's estimate
     static constexpr float DRIFT_EST_DISAGREE_GATE_MPS = 0.75f;  // max accepted sample jump (m/s)  
     void update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms);  
-    Vector2f _drift_est_predicted_disp_ne_m;   // predicted NE displacement since window start (m)  
-    Vector2p _drift_est_actual_pos_start_ne_m; // actual NE position at window start (m)  
-    uint32_t _drift_est_window_start_ms;       // window start time (0 = no window active)  
-    uint32_t _drift_est_last_update_ms;        // last integrator update time  
-    bool     _drift_est_window_valid;    // false if any gate failed during current window  
-    uint16_t _drift_est_ekf_reset_count; // EKF NE-reset count at window start
+    Vector2f _drift_est_predicted_disp_ne_m;   // predicted NE displacement since window start (m)    
+    Vector2p _drift_est_actual_pos_start_ne_m; // actual NE position at window start (m)    
+    uint32_t _drift_est_window_start_ms = 0;   // window start time (0 = no window active)    
+    uint32_t _drift_est_last_update_ms = 0;    // last integrator update time    
+    bool     _drift_est_window_valid = false;  // false if any gate failed during current window    
+    uint16_t _drift_est_ekf_reset_count = 0;   // EKF NE-reset count at window start
   
     // performs a controlled stop. returns true once vehicle has stopped  
     bool stop_vehicle();
@@ -242,9 +242,17 @@ protected:
     // private members for waypoint navigation  
     float _distance_to_destination; // straight-line distance from vehicle to final destination in meters  
     bool _reached_destination;  // true once the vehicle has reached the destination  
-    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter  
+    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter    
   
-    // last calc_steering_to_heading() call time; steering floor in calc_throttle()  
+    // heading target actually passed to the heading controller by the last    
+    // calc_steering_to_heading() call (may include drift compensation). kept    
+    // separate from _desired_yaw_cd so callers like Guided HeadingAndSpeed    
+    // don't get their persistent commanded target overwritten by the    
+    // compensated value (which would compound the crab angle every tick).    
+    // calc_throttle() uses THIS for the vectored-thrust floor yaw error.    
+    float _steering_target_yaw_cd = 0.0f;    
+  
+    // last calc_steering_to_heading() call time; steering floor in calc_throttle()
     // applies only while fresh (<50ms) so it auto-expires on mode switch or when  
     // turn-rate/manual modes take over  
     uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
@@ -717,14 +725,19 @@ protected:
     float _desired_speed;       // desired speed (ramped down from initial speed to zero)
 
     // current/wind drift-estimate detection state  
-    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample  
+    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample    
+    static constexpr uint8_t LOITER_DRIFT_ZERO_TICKS   = 5;      // consecutive in-window ticks with |I| below noise floor before a zero-drift sample is accepted
+	// LOITER_DRIFT_ROT_ANG_DEG moved to LOIT_ROT_ANG parameter (tunable via GCS)
+	// LOITER_DRIFT_ROT_RATE_DGS moved to LOIT_ROT_RATE  parameter (tunable via GCS)
+
   
     // method-2 sampling state: filtered I-term magnitude while the speed PID  
     // is actively holding the vehicle against drift (decel-to-stop window)  
     float _drift_i_filt = 0.0f;  
     bool  _drift_i_filt_valid = false; 
     float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend  
-    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting  
+    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting    
+    uint8_t _drift_zero_count = 0;  // consecutive equilibrium-window ticks with |I| below LOIT_I_MIN (pending zero-drift sample) 
   
     // hysteresis band on the loiter-radius boundary so heading logic does not  
     // flap between "aim at center" and "aim into drift" while oscillating  
