@@ -26,14 +26,23 @@ bool ModeLoiter::_enter()
     _inside_loiter_circle = false;
   
     // handoff: seed loiter estimate from the nav-source value, weighted by age.  
-    // mirrors Mode::enter(). age >= DRIFT_SEED_MIN_AGE_MS rejects same-tick echo  
-    // written by the other mode's _enter() during this call chain.
+    // mirrors Mode::enter() - seeded sources accepted (timestamp preserved,  
+    // ping-pong converges to zero). guard: never overwrite a real measured  
+    // loiter estimate with a weighted seed copy.  
   
-    Vector2f nav_ne;    
-    uint32_t nav_age_ms = 0;    
+    Vector2f nav_ne;  
+    uint32_t nav_age_ms = 0;  
     bool nav_is_seeded = false;  
-    if (g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
-        !nav_is_seeded && (nav_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
+    Vector2f loiter_ne;  
+    uint32_t loiter_age_ms = 0;  
+    bool loiter_is_seeded = false;  
+    const bool loiter_has_real =  
+        g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
+        !loiter_is_seeded &&  
+        (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f));  
+    if (!loiter_has_real &&  
+        g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
+        (nav_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
         (nav_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
         const float age_s = nav_age_ms * 0.001f;    
         const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
@@ -108,7 +117,7 @@ void ModeLoiter::update()
         // during rotation - detected by thruster deflection (cause) and yaw  
         // rate (effect), both direct measurements, no estimation.  
         const float vec_angle_deg = fabsf(degrees(g2.motors.get_vectored_angle_rad()));  
-        const float yaw_rate_degs = fabsf(degrees(ahrs.get_gyro().z));  
+        const float yaw_rate_degs = fabsf(degrees(ahrs.get_yaw_rate_earth()));  
         const float rot_ang_deg = g2.motors.get_loit_rot_ang_deg();  
         const float rot_rate_dps = g2.motors.get_loit_rot_rate_dps();  
         const bool rotating = (rot_ang_deg > 0.0f && vec_angle_deg > rot_ang_deg) ||  
@@ -211,6 +220,9 @@ void ModeLoiter::update()
                 // normalise to -1..1 first, THEN multiply by max angle in radians  
                 const float steer_ang_rad = (g2.motors.get_steering() / 4500.0f)  
                                             * radians(g2.motors.get_vector_angle_max());  
+                // assumes bow-pull thruster convention: thrust dir = yaw + steer  
+                // angle. for a stern-push or inverted-output thruster this is  
+                // 180deg off - flip the sign of meas_dir_ne below if needed.  
                 const float thrust_rad = ahrs.get_yaw_rad() + steer_ang_rad;  
                 // drift vector = opposite of the force that holds us in place  
                 meas_dir_ne = Vector2f{-cosf(thrust_rad), -sinf(thrust_rad)};  

@@ -57,14 +57,29 @@ bool Mode::enter()
             _drift_est_window_valid = false;  
   
             // one-shot seed from Loiter, age-weighted; avoids cold (0,0) start.  
-            // DRIFT_SEED_MIN_AGE_MS rejects same-tick echo (ModeGuided::_enter ->  
-            // start_loiter -> ModeLoiter::_enter seeding back what we just wrote).
+            // seeded sources accepted: the seed carries the ORIGINAL sample  
+            // timestamp, so ping-pong between slots is safe - each bounce  
+            // multiplies by seed_weight <= 1 and the value keeps aging toward  
+            // DRIFT_MAXAGE (converges to zero, never amplifies). needed for  
+            // bridge Guided->Loiter->Guided resets where loiter never takes a  
+            // real sample during the short window.  
+            // guard: never overwrite a real (measured) destination estimate  
+            // with a weighted seed copy - a real sample has higher priority  
+            // in get_current_estimate_ne() and must not be degraded to seeded.  
   
-            Vector2f loiter_ne;    
+            Vector2f loiter_ne;  
             uint32_t loiter_age_ms = 0;  
             bool loiter_is_seeded = false;  
-            if (g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
-                !loiter_is_seeded && (loiter_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&
+            Vector2f nav_ne;  
+            uint32_t nav_age_ms = 0;  
+            bool nav_is_seeded = false;  
+            const bool nav_has_real =  
+                g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
+                !nav_is_seeded &&  
+                (nav_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f));  
+            if (!nav_has_real &&  
+                g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
+                (loiter_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
                 (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
                 const float age_s = loiter_age_ms * 0.001f;    
                 const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
@@ -374,9 +389,13 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     // angles where drift-hold needs it most    
     if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {    
     
-        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error      
-        throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
-    }  
+        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error.  
+        // only scale forward thrust - a negative (braking) PID demand must pass  
+        // through unchanged, otherwise a heavy boat cannot decelerate during a  
+        // large heading change  
+        if (is_positive(throttle_out)) {  
+            throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
+        }  
   
     // forward drift/current feed-forward: added directly to throttle output,    
     // never to target_speed, so it doesn't shift the PID's ground-speed setpoint.    
