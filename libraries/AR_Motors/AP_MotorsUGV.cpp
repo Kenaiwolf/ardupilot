@@ -278,7 +278,7 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @Units: deg/s      
     // @Range: 0 90      
     // @User: Advanced      
-    AP_GROUPINFO("LOIT_ROT_RATE", 37, AP_MotorsUGV, _loit_rot_rate_dps, 10.0f),    
+    AP_GROUPINFO("LOIT_ROT_RATE", 37, AP_MotorsUGV, _loit_rot_rate_dps, 20.0f),    
   
     // @Param: DRIFT_EST_YAWR      
     // @DisplayName: Nav drift estimator yaw rate gate      
@@ -286,7 +286,7 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @Units: deg/s      
     // @Range: 0 45      
     // @User: Advanced      
-    AP_GROUPINFO("DRIFT_EST_YAWR", 38, AP_MotorsUGV, _drift_est_yaw_rate_dps, 5.0f),    
+    AP_GROUPINFO("DRIFT_EST_YAWR", 38, AP_MotorsUGV, _drift_est_yaw_rate_dps, 15.0f),    
   
     AP_GROUPEND    
 };
