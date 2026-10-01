@@ -91,7 +91,8 @@ public:
     bool have_skid_steering() const;
 
     // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)  
-    bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }  
+    bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }
+    float get_vector_angle_max() const { return _vector_angle_max; }	
   
     // steering-floor / loiter-drift tunable getters (used by Mode::calc_throttle and ModeLoiter)  
     float get_steer_floor_deadband_deg() const { return _sfl_deadband_deg; }  
