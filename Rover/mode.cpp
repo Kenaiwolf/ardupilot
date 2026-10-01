@@ -393,10 +393,11 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         // only scale forward thrust - a negative (braking) PID demand must pass  
         // through unchanged, otherwise a heavy boat cannot decelerate during a  
         // large heading change  
-        if (is_positive(throttle_out)) {  
-            throttle_out *= MAX(0.0f, cosf(yaw_error_rad));  
-        }  
-  
+        if (is_positive(throttle_out)) {    
+            throttle_out *= MAX(0.0f, cosf(yaw_error_rad));    
+        }    
+    } 
+    
     // forward drift/current feed-forward: added directly to throttle output,    
     // never to target_speed, so it doesn't shift the PID's ground-speed setpoint.    
     // placed AFTER cosine reduction so a large crab angle does not erase the    
