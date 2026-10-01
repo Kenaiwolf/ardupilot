@@ -103,7 +103,15 @@ public:
     float get_loit_i_eq_err_mps()            const { return _loit_i_eq_err; }  
     float get_loit_i_min()                   const { return _loit_i_min; }  
     float get_loit_i_alpha()                 const { return _loit_i_alpha; }  
-    float get_loit_i_disagree()              const { return _loit_i_disagree; }
+    float get_loit_i_disagree()              const { return _loit_i_disagree; }  
+    float get_loit_rot_ang_deg()             const { return _loit_rot_ang_deg; }  
+    float get_loit_rot_rate_dps()            const { return _loit_rot_rate_dps; }  
+    float get_drift_est_yaw_rate_dps()       const { return _drift_est_yaw_rate_dps; }
+    // last commanded vectored-thrust steering angle (rad). 0 when vectored  
+    // thrust is disabled. used by loiter method-1 gating: a deflected  
+    // thruster rotates the hull, and rotation about the ~0.6m pivot radius  
+    // produces lateral IMU velocity that would be misread as drift  
+    float get_vectored_angle_rad()         const { return have_vectored_thrust() ? _vec_last_steering_angle_rad : 0.0f; }
 
     // set an externally-measured wind+current drift estimate (m/s, North/East), one
     // independent slot per acquisition method.  the per-source gain (DRIFT_GAIN_LOIT /
@@ -285,12 +293,15 @@ private:
     AP_Float _loit_i_disagree;     // fraction by which a new sample may differ before being down-weighted to 25%
     AP_Float _drift_comp_gain_loiter;  // gain applied to a Loiter-sourced drift sample at the moment it is written via set_loiter_estimate_ne().  zero to disable that source entirely
     AP_Float _drift_comp_gain_nav;  // gain applied to nav-sourced drift sample at write-time via set_nav_estimate_ne(). zero disables this source
-    AP_Float _drift_max_age_s;   // shared staleness cutoff (s) common to both sources: if neither has been updated within this many seconds, get_current_estimate_ne() returns false (correction fully off).  e.g. 1800 = 30min
+    AP_Float _drift_max_age_s;   // shared staleness cutoff (s) common to both sources: if neither has been updated within this many seconds, get_current_estimate_ne() returns false (correction fully off).  e.g. 1800 = 30min  
+    AP_Float _loit_rot_ang_deg;      // vectored-thruster deflection (deg) above which loiter method-1 coast sampling is blocked - rotation about the pivot produces lateral velocity that would be misread as drift  
+    AP_Float _loit_rot_rate_dps;     // yaw rate (deg/s) above which loiter method-1 coast sampling is blocked  
+    AP_Float _drift_est_yaw_rate_dps; // yaw rate (deg/s) above which the shared nav drift-estimator window is invalidated
 
     // internal variables
     float   _steering;  // requested steering as a value from -4500 to +4500
     float   _throttle;  // requested throttle as a value from -100 to 100
-    float   _throttle_prev; // throttle input from previous iteration
+    float   _throttle_prev = 0.0f; // throttle input from previous iteration
     float   _throttle_limit = 1.0f;  // used for current limiting
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
     float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend

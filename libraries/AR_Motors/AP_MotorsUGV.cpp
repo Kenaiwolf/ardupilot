@@ -262,9 +262,33 @@ const AP_Param::GroupInfo AP_MotorsUGV::var_info[] = {
     // @Description: If a new estimate differs from the stored one by more than this fraction of its magnitude, blend only 25% of the way (NAV-style trend check)    
     // @Range: 0.1 2.0    
     // @User: Advanced    
-    AP_GROUPINFO("LOIT_I_DISAG", 35, AP_MotorsUGV, _loit_i_disagree, 0.5f),  
+    AP_GROUPINFO("LOIT_I_DISAG", 35, AP_MotorsUGV, _loit_i_disagree, 0.5f),    
   
-    AP_GROUPEND  
+    // @Param: LOIT_ROT_ANG      
+    // @DisplayName: Loiter drift method-1 rotation angle gate      
+    // @Description: Vectored-thruster deflection (deg) above which coast drift sampling is blocked. Rotating the hull about its pivot point produces real lateral IMU velocity (v = yaw_rate * pivot_radius) that would be misread as drift. 0 disables the gate      
+    // @Units: deg      
+    // @Range: 0 90      
+    // @User: Advanced      
+    AP_GROUPINFO("LOIT_ROT_ANG", 36, AP_MotorsUGV, _loit_rot_ang_deg, 15.0f),    
+  
+    // @Param: LOIT_ROT_RATE      
+    // @DisplayName: Loiter drift method-1 yaw rate gate      
+    // @Description: Yaw rate (deg/s) above which coast drift sampling is blocked. During rotation the IMU orbits the pivot point (~0.6m) - e.g. 45deg/s = ~0.5m/s false drift. 0 disables the gate      
+    // @Units: deg/s      
+    // @Range: 0 90      
+    // @User: Advanced      
+    AP_GROUPINFO("LOIT_ROT_RATE", 37, AP_MotorsUGV, _loit_rot_rate_dps, 10.0f),    
+  
+    // @Param: DRIFT_EST_YAWR      
+    // @DisplayName: Nav drift estimator yaw rate gate      
+    // @Description: Yaw rate (deg/s) above which the shared drift-estimator window (navigate_to_waypoint/Guided) is invalidated. Keep tighter than LOIT_ROT_RATE - the estimator needs long clean windows, not sample count      
+    // @Units: deg/s      
+    // @Range: 0 45      
+    // @User: Advanced      
+    AP_GROUPINFO("DRIFT_EST_YAWR", 38, AP_MotorsUGV, _drift_est_yaw_rate_dps, 5.0f),    
+  
+    AP_GROUPEND    
 };
 
 AP_MotorsUGV::AP_MotorsUGV(AP_WheelRateControl& rate_controller) :  
@@ -306,12 +330,20 @@ void AP_MotorsUGV::set_nav_estimate_ne(const Vector2f &drift_ne)
     _nav_estimate_is_seeded = false;  
 } 
   
-// seed the Guided slot - source_ms preserves the original measurement time  
-void AP_MotorsUGV::seed_loiter_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms)  
-{  
-    _loiter_estimate_ne = drift_ne;  
-    _loiter_estimate_ms = source_ms;  
-    _loiter_estimate_is_seeded = true;  
+// seed the Loiter slot - source_ms preserves the original measurement time    
+void AP_MotorsUGV::seed_loiter_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms)    
+{    
+    _loiter_estimate_ne = drift_ne;    
+    _loiter_estimate_ms = source_ms;    
+    _loiter_estimate_is_seeded = true;    
+}  
+  
+// seed the nav/Guided slot - source_ms preserves the original measurement time    
+void AP_MotorsUGV::seed_nav_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms)    
+{    
+    _nav_estimate_ne = drift_ne;    
+    _nav_estimate_ms = source_ms;    
+    _nav_estimate_is_seeded = true;    
 }
   
 bool AP_MotorsUGV::get_loiter_estimate_ne(Vector2f &drift_ne, uint32_t &age_ms, bool &is_seeded) const  
