@@ -4,6 +4,7 @@
 #include <AP_WheelEncoder/AP_WheelRateControl.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AP_BattMonitor/AP_BattMonitor_config.h>
+#include <AP_Math/AP_Math.h>
 
 class AP_MotorsUGV {
 public:
@@ -89,8 +90,63 @@ public:
     // true if vehicle is capable of skid steering
     bool have_skid_steering() const;
 
-    // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)
+    // true if vehicle has vectored thrust (i.e. boat with motor on steering servo)  
     bool have_vectored_thrust() const { return is_positive(_vector_angle_max); }
+    float get_vector_angle_max() const { return _vector_angle_max; }	
+  
+    // steering-floor / loiter-drift tunable getters (used by Mode::calc_throttle and ModeLoiter)  
+    float get_steer_floor_deadband_deg() const { return _sfl_deadband_deg; }  
+    float get_steer_floor_gain()             const { return _sfl_gain; }  
+    float get_steer_floor_max_pct()          const { return _sfl_max_pct; }  
+    float get_steer_floor_ifreeze_deg()      const { return _sfl_ifreeze_deg; }  
+    float get_loit_drift_min_mps()           const { return _loit_drift_min; }  
+    float get_loit_coast_thr_pct()           const { return _loit_coast_thr; }  
+    float get_loit_i_eq_err_mps()            const { return _loit_i_eq_err; }  
+    float get_loit_i_min()                   const { return _loit_i_min; }  
+    float get_loit_i_alpha()                 const { return _loit_i_alpha; }  
+    float get_loit_i_disagree()              const { return _loit_i_disagree; }  
+    float get_loit_rot_ang_deg()             const { return _loit_rot_ang_deg; }  
+    float get_loit_rot_rate_dps()            const { return _loit_rot_rate_dps; }  
+    float get_drift_est_yaw_rate_dps()       const { return _drift_est_yaw_rate_dps; }
+    // last commanded vectored-thrust steering angle (rad). 0 when vectored  
+    // thrust is disabled. used by loiter method-1 gating: a deflected  
+    // thruster rotates the hull, and rotation about the ~0.6m pivot radius  
+    // produces lateral IMU velocity that would be misread as drift  
+    float get_vectored_angle_rad()         const { return have_vectored_thrust() ? _vec_last_steering_angle_rad : 0.0f; }
+
+    // set an externally-measured wind+current drift estimate (m/s, North/East), one
+    // independent slot per acquisition method.  the per-source gain (DRIFT_GAIN_LOIT /
+    // DRIFT_GAIN_NAV) is applied here, at write-time, so the value returned by
+    // get_current_estimate_ne() below is already the final, PID-ready corrected vector --
+    // Mode::apply_drift_compensation()/calc_throttle() must NOT apply any further gain to it.
+    void set_loiter_estimate_ne(const Vector2f &drift_ne);
+    void set_nav_estimate_ne(const Vector2f &drift_ne);
+
+    // seed the opposite-mode slot directly with an already-calibrated value
+    // (e.g. handoff at mode entry) - unlike set_loiter/nav_estimate_ne(),
+    // these do NOT apply DRIFT_GAIN_LOIT/DRIFT_GAIN_NAV, because the value
+    // passed in has already had the *source* mode's gain applied and must
+    // not be double-scaled by the *destination* mode's own gain.
+    void seed_loiter_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms);
+    void seed_nav_estimate_ne(const Vector2f &drift_ne, uint32_t source_ms);
+    bool is_loiter_estimate_seeded() const { return _loiter_estimate_is_seeded; }
+    bool is_nav_estimate_seeded() const { return _nav_estimate_is_seeded; }
+
+    // returns the more recently-updated of the two per-source estimates (gain already
+    // applied).  returns false if both sources are older than DRIFT_MAXAGE seconds
+    // (shared staleness cutoff -- e.g. 1800s/30min -- past which correction is treated
+    // as fully decayed / "wind stopped", not just faded).
+    bool get_current_estimate_ne(Vector2f &current_ne) const;
+
+    // used at mode-entry handoff time: lets the mode being entered seed its own estimate
+    // from the other source's still-fresh (already gain-corrected) value instead of
+    // starting cold at zero.  age_ms is time since that source last wrote a sample.
+    bool get_loiter_estimate_ne(Vector2f &drift_ne, uint32_t &age_ms, bool &is_seeded) const;
+    bool get_nav_estimate_ne(Vector2f &drift_ne, uint32_t &age_ms, bool &is_seeded) const;
+
+    // shared staleness cutoff (s) common to both sources - exposed so mode
+    // code can compute its own age-based handoff weighting
+    float get_drift_max_age_s() const { return _drift_max_age_s; }
 
     // output to motors and steering servos
     // ground_speed should be the vehicle's speed over the surface in m/s
@@ -163,7 +219,7 @@ private:
     void clear_omni_motors(int8_t motor_num);
 
     // output to regular steering and throttle channels
-    void output_regular(bool armed, float ground_speed, float steering, float throttle);
+    void output_regular(bool armed, float ground_speed, float steering, float throttle, float dt);
 
     // output to skid steering channels
     void output_skid_steering(bool armed, float steering, float throttle, float dt);
@@ -220,17 +276,49 @@ private:
     AP_Float _steering_throttle_mix; // Steering vs Throttle priorisation.  Higher numbers prioritise steering, lower numbers prioritise throttle.  Only valid for Skid Steering vehicles
     AP_Float _reverse_delay; // delay in seconds when reversing motor
     AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power
+    AP_Float _vec_deadband;    // deadband on total commanded steering/throttle vector magnitude below which the vectored-thrust angle is frozen instead of recalculated, suppressing atan() noise amplification near zero throttle
+    AP_Float _vec_blend_thr;   // filtered throttle (normalised 0~1) below which vectored-thrust steering angle is computed directly/proportionally from steering demand instead of atan(steering/throttle)
+    AP_Float _vec_resid_tc;    // time constant (s) of the low-pass filter applied to throttle before it is used to select/blend the vectored-thrust regime  
+  
+    // steering-to-throttle floor tunables (vectored-thrust runaway prevention)  
+    AP_Float _sfl_deadband_deg;    // heading error (deg) below which no floor throttle is injected  
+    AP_Float _sfl_gain;            // floor throttle % per degree of error above deadband  
+    AP_Float _sfl_max_pct;         // maximum floor throttle (%)  
+    AP_Float _sfl_ifreeze_deg;     // heading error (deg) above which speed-PID I-term is frozen  
+    // loiter drift-estimation tunables  
+    AP_Float _loit_drift_min;      // minimum drift magnitude (m/s) to activate anti-drift heading in loiter  
+    AP_Float _loit_coast_thr;      // pre-floor throttle demand (%) below which the vehicle is considered coasting  
+    AP_Float _loit_i_eq_err;       // speed-PID error (m/s) below which I-term is at drift equilibrium  
+    AP_Float _loit_i_min;          // minimum I-term magnitude (0-1) accepted as a drift sample  
+    AP_Float _loit_i_alpha;        // EMA alpha for I-term magnitude filtering  
+    AP_Float _loit_i_disagree;     // fraction by which a new sample may differ before being down-weighted to 25%
+    AP_Float _drift_comp_gain_loiter;  // gain applied to a Loiter-sourced drift sample at the moment it is written via set_loiter_estimate_ne().  zero to disable that source entirely
+    AP_Float _drift_comp_gain_nav;  // gain applied to nav-sourced drift sample at write-time via set_nav_estimate_ne(). zero disables this source
+    AP_Float _drift_max_age_s;   // shared staleness cutoff (s) common to both sources: if neither has been updated within this many seconds, get_current_estimate_ne() returns false (correction fully off).  e.g. 1800 = 30min  
+    AP_Float _loit_rot_ang_deg;      // vectored-thruster deflection (deg) above which loiter method-1 coast sampling is blocked - rotation about the pivot produces lateral velocity that would be misread as drift  
+    AP_Float _loit_rot_rate_dps;     // yaw rate (deg/s) above which loiter method-1 coast sampling is blocked  
+    AP_Float _drift_est_yaw_rate_dps; // yaw rate (deg/s) above which the shared nav drift-estimator window is invalidated
 
     // internal variables
     float   _steering;  // requested steering as a value from -4500 to +4500
     float   _throttle;  // requested throttle as a value from -100 to 100
-    float   _throttle_prev; // throttle input from previous iteration
+    float   _throttle_prev = 0.0f; // throttle input from previous iteration
     float   _throttle_limit = 1.0f;  // used for current limiting
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
+    float   _vec_throttle_filt;           // low-pass filtered throttle_norm used by vectored-thrust steering blend
+	float   _vec_steering_filt;   // low-pass filtered steering_norm, same time constant as _vec_throttle_filt
+    float   _vec_last_steering_angle_rad; // last commanded vectored-thrust steering angle (rad), held during deadband
+    float   _vec_last_w;                  // last blend weight (w), held during deadband so throttle boost stays consistent
+    Vector2f _loiter_estimate_ne;           // Loiter-sourced drift estimate (m/s NE), gain applied
+    uint32_t _loiter_estimate_ms;           // ms _loiter_estimate_ne last updated; 0=never
+    Vector2f _nav_estimate_ne;           // Guided-sourced drift estimate (m/s, NE), gain applied
+    uint32_t _nav_estimate_ms;           // system time (ms) _nav_estimate_ne was last updated; 0 if never set
+    bool _loiter_estimate_is_seeded;  // true if current value came from a seed, not a real sample
+    bool _nav_estimate_is_seeded;  // true if current value came from a seed, not a real sample
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1
     float   _pitch;     // requested pitch as a value from -1 to +1
-    float   _walking_height; // requested height as a value from -1 to +1   
+    float   _walking_height; // requested height as a value from -1 to +1
     float   _mainsail;  // requested mainsail input as a value from 0 to 100
     float   _wingsail;  // requested wing sail input as a value in the range +- 100
     float   _mast_rotation;  // requested mast rotation input as a value in the range +- 100
