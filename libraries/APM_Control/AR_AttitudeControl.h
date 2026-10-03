@@ -74,9 +74,12 @@ public:
     //   cruise speed should be in m/s, cruise throttle should be a number from -1 to +1
     float get_throttle_out_speed(float desired_speed, bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt);
 
-    // return a throttle output from -1 to +1 to perform a controlled stop.  stopped is set to true once stop has been completed
-    float get_throttle_out_stop(bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt, bool &stopped);
-
+    // return a throttle output from -1 to +1 to perform a controlled stop.  stopped is set to true once stop has been completed  
+    float get_throttle_out_stop(bool motor_limit_low, bool motor_limit_high, float cruise_speed, float cruise_throttle, float dt, bool &stopped);  
+  
+    // get speed->throttle curve exponent (see _speed_thr_expo).  1.0 = linear  
+    float get_speed_thr_expo() const { return is_positive(_speed_thr_expo) ? _speed_thr_expo.get() : 1.0f; }  
+  
     // balancebot pitch to throttle controller
     // returns a throttle output from -1 to +1 given a desired pitch angle (in radians)
     // pitch_max should be the user defined max pitch angle (in radians)
@@ -113,8 +116,8 @@ public:
     float get_accel_max() const { return MAX(_throttle_accel_max, 0.0f); }
 
     // get throttle/speed controller maximum deceleration
-    float get_decel_max() const;
-
+    float get_decel_max() const;  
+  
     // check if speed controller active
     bool speed_control_active() const;
 
@@ -149,8 +152,9 @@ private:
     AP_Float _pitch_limit_tc;       // balancebot pitch limit protection time constant
     AP_Float _pitch_limit_throttle_thresh;  // balancebot pitch limit throttle threshold (in the range 0 to 1.0)
 
-    AP_Float _throttle_accel_max;   // speed/throttle control acceleration (and deceleration) maximum in m/s/s.  0 to disable limits
-    AP_Float _throttle_decel_max;    // speed/throttle control deceleration maximum in m/s/s. 0 to use ATC_ACCEL_MAX for deceleration
+    AP_Float _throttle_accel_max;   // speed/throttle control acceleration (and deceleration) maximum in m/s/s.  0 to disable limits  
+    AP_Float _throttle_decel_max;    // speed/throttle control deceleration maximum in m/s/s. 0 to use ATC_ACCEL_MAX for deceleration  
+    AP_Float _speed_thr_expo;       // speed->throttle curve exponent. 1.0 = linear (default), >1.0 = concave curve typical for boats
     AP_Int8  _brake_enable;         // speed control brake enable/disable. if set to 1 a reversed output to the motors to slow the vehicle.
     AP_Float _stop_speed;           // speed control stop speed.  Motor outputs to zero once vehicle speed falls below this value
     AP_Float _steer_accel_max;      // steering angle acceleration max in deg/s/s
