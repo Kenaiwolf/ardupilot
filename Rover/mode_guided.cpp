@@ -321,14 +321,6 @@ bool ModeGuided::get_desired_location(Location& destination) const
 // set desired location
 bool ModeGuided::set_desired_location(const Location &destination, Location next_destination)
 {
-#if AP_FENCE_ENABLED
-    // reject destination outside the fence
-    if (!rover.fence.check_location_within_fence(destination)) {
-        LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::DEST_OUTSIDE_FENCE);
-        return false;
-    }
-#endif
-
     if (use_scurves_for_navigation()) {
         // use scurves for navigation
         if (!g2.wp_nav.set_desired_location(destination, next_destination)) {
@@ -472,5 +464,5 @@ bool ModeGuided::use_scurves_for_navigation() const
 // return guided mode timeout in milliseconds. Only used for velocity, throttle, heading or turn rate control
 uint32_t ModeGuided::get_timeout_ms() const
 {
-    return MAX(g2.guided_timeout, 0.1) * 1000;
+    return 3000;
 }

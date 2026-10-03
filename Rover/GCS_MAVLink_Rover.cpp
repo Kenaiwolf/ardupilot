@@ -72,9 +72,32 @@ MAV_STATE GCS_MAVLINK_Rover::vehicle_system_status() const
     return MAV_STATE_ACTIVE;
 }
 
-bool GCS_MAVLINK_Rover::get_target_location(Location &target) const
-{
-    return rover.control_mode->get_desired_location(target);
+void GCS_MAVLINK_Rover::send_position_target_global_int()  
+{  
+    Location target;  
+    if (!rover.control_mode->get_desired_location(target)) {  
+        return;  
+    }  
+    static constexpr uint16_t POSITION_TARGET_TYPEMASK_LAST_BYTE = 0xF000;  
+    static constexpr uint16_t TYPE_MASK = POSITION_TARGET_TYPEMASK_VX_IGNORE | POSITION_TARGET_TYPEMASK_VY_IGNORE | POSITION_TARGET_TYPEMASK_VZ_IGNORE |  
+                                          POSITION_TARGET_TYPEMASK_AX_IGNORE | POSITION_TARGET_TYPEMASK_AY_IGNORE | POSITION_TARGET_TYPEMASK_AZ_IGNORE |  
+                                          POSITION_TARGET_TYPEMASK_YAW_IGNORE | POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE | POSITION_TARGET_TYPEMASK_LAST_BYTE;  
+    mavlink_msg_position_target_global_int_send(  
+        chan,  
+        AP_HAL::millis(), // time_boot_ms  
+        MAV_FRAME_GLOBAL, // targets are always global altitude  
+        TYPE_MASK, // ignore everything except the x/y/z components  
+        target.lat, // latitude as 1e7  
+        target.lng, // longitude as 1e7  
+        target.alt * 0.01f, // altitude is sent as a float  
+        0.0f, // vx  
+        0.0f, // vy  
+        0.0f, // vz  
+        0.0f, // afx  
+        0.0f, // afy  
+        0.0f, // afz  
+        0.0f, // yaw  
+        0.0f); // yaw_rate  
 }
 
 void GCS_MAVLINK_Rover::send_nav_controller_output() const
@@ -526,25 +549,59 @@ MAV_RESULT GCS_MAVLINK_Rover::handle_command_int_packet(const mavlink_command_in
             // first-item/last item not supported
             return MAV_RESULT_DENIED;
         }
-        if (rover.set_mode(rover.mode_auto, ModeReason::GCS_COMMAND)) {
-            return MAV_RESULT_ACCEPTED;
-        }
-        return MAV_RESULT_FAILED;
-
-    default:
-        return GCS_MAVLINK::handle_command_int_packet(packet, msg);
-    }
-}
+        if (rover.set_mode(rover.mode_auto, ModeReason::GCS_COMMAND)) {  
+            return MAV_RESULT_ACCEPTED;  
+        }  
+        return MAV_RESULT_FAILED;  
+  
+#if AP_MAVLINK_MAV_CMD_NAV_SET_YAW_SPEED_ENABLED  
+    case MAV_CMD_NAV_SET_YAW_SPEED:  
+        send_received_message_deprecation_warning("MAV_CMD_NAV_SET_YAW_SPEED");  
+        return handle_command_nav_set_yaw_speed(packet, msg);  
+#endif  
+  
+    default:  
+        return GCS_MAVLINK::handle_command_int_packet(packet, msg);  
+    }  
+}  
+  
+#if AP_MAVLINK_MAV_CMD_NAV_SET_YAW_SPEED_ENABLED  
+MAV_RESULT GCS_MAVLINK_Rover::handle_command_nav_set_yaw_speed(const mavlink_command_int_t &packet, const mavlink_message_t &msg)  
+{  
+        // param1 : yaw angle (may be absolute or relative)  
+        // param2 : Speed - in metres/second  
+        // param3 : 0 = param1 is absolute, 1 = param1 is relative  
+  
+        // exit if vehicle is not in Guided mode  
+        if (!rover.control_mode->in_guided_mode()) {  
+            return MAV_RESULT_FAILED;  
+        }  
+  
+        // get final angle, 1 = Relative, 0 = Absolute  
+        if (packet.param3 > 0) {  
+            // relative angle  
+            rover.mode_guided.set_desired_heading_delta_and_speed(packet.param1 * 100.0f, packet.param2);  
+        } else {  
+            // absolute angle  
+            rover.mode_guided.set_desired_heading_and_speed(packet.param1 * 100.0f, packet.param2);  
+        }  
+        return MAV_RESULT_ACCEPTED;  
+}  
+#endif
 
 MAV_RESULT GCS_MAVLINK_Rover::handle_command_int_do_reposition(const mavlink_command_int_t &packet)
 {
-    const bool change_modes = ((int32_t)packet.param2 & MAV_DO_REPOSITION_FLAGS_CHANGE_MODE) == MAV_DO_REPOSITION_FLAGS_CHANGE_MODE;
-    if (!rover.control_mode->in_guided_mode() && !change_modes) {
-        return MAV_RESULT_DENIED;
-    }
-
-    if (packet.x == 0 && packet.y == 0) {
-        return MAV_RESULT_DENIED;
+    const bool change_modes = ((int32_t)packet.param2 & MAV_DO_REPOSITION_FLAGS_CHANGE_MODE) == MAV_DO_REPOSITION_FLAGS_CHANGE_MODE;  
+    if (!rover.control_mode->in_guided_mode() && !change_modes) {  
+        return MAV_RESULT_DENIED;  
+    }  
+  
+    // sanity check location  
+    if (!check_latlng(packet.x, packet.y)) {  
+        return MAV_RESULT_DENIED;  
+    }  
+    if (packet.x == 0 && packet.y == 0) {  
+        return MAV_RESULT_DENIED;  
     }
 
     Location requested_location {};
