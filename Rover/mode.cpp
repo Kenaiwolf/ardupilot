@@ -347,7 +347,7 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     float yaw_error_rad = 0.0f;  
     float yaw_error_deg = 0.0f;  
     const bool steering_heading_fresh = _steering_heading_active_ms != 0 &&  
-        (AP_HAL::millis() - _steering_heading_active_ms) < 50;  
+        (AP_HAL::millis() - _steering_heading_active_ms) < 75;  
     if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
         yaw_error_rad = wrap_180_cd(_steering_target_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);
         yaw_error_deg = fabsf(degrees(yaw_error_rad));  
