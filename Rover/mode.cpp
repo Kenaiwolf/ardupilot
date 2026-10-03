@@ -40,18 +40,56 @@ bool Mode::enter()
         }
     }
 
-    bool ret = _enter();
-
-    // initialisation common to all modes
-    if (ret) {
-        // init reversed flag
-        init_reversed_flag();
-
-        // clear sailboat tacking flags
-        g2.sailboat.clear_tack();
-    }
-
-    return ret;
+    bool ret = _enter();  
+  
+    // initialisation common to all modes  
+    if (ret) {  
+        // init reversed flag  
+        init_reversed_flag();  
+  
+        // clear sailboat tacking flags  
+        g2.sailboat.clear_tack();  
+  
+        // drift handoff: autopilot modes seed from Loiter's estimate  
+        if (is_autopilot_mode() && (mode_number() != Number::LOITER)) {  
+            // reset estimator window - no stale window across mode sessions  
+            _drift_est_window_start_ms = 0;  
+            _drift_est_window_valid = false;  
+  
+            // one-shot seed from Loiter, age-weighted; avoids cold (0,0) start.  
+            // seeded sources accepted: the seed carries the ORIGINAL sample  
+            // timestamp, so ping-pong between slots is safe - each bounce  
+            // multiplies by seed_weight <= 1 and the value keeps aging toward  
+            // DRIFT_MAXAGE (converges to zero, never amplifies). needed for  
+            // bridge Guided->Loiter->Guided resets where loiter never takes a  
+            // real sample during the short window.  
+            // guard: never overwrite a real (measured) destination estimate  
+            // with a weighted seed copy - a real sample has higher priority  
+            // in get_current_estimate_ne() and must not be degraded to seeded.  
+  
+            Vector2f loiter_ne;  
+            uint32_t loiter_age_ms = 0;  
+            bool loiter_is_seeded = false;  
+            Vector2f nav_ne;  
+            uint32_t nav_age_ms = 0;  
+            bool nav_is_seeded = false;  
+            const bool nav_has_real =  
+                g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
+                !nav_is_seeded &&  
+                (nav_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f));  
+            if (!nav_has_real &&  
+                g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
+                (loiter_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
+                (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
+                const float age_s = loiter_age_ms * 0.001f;    
+                const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
+                const float seed_weight = constrain_float(1.0f - (age_s / max_age_s), 0.0f, 1.0f);    
+                g2.motors.seed_nav_estimate_ne(loiter_ne * seed_weight, AP_HAL::millis() - loiter_age_ms);  
+            }  
+        }  
+    }  
+  
+    return ret;  
 }
 
 // decode pilot steering and throttle inputs and return in steer_out and throttle_out arguments
@@ -228,12 +266,12 @@ float Mode::nav_bearing() const
 }
 
 // return cross track error (i.e. vehicle's distance from the line between waypoints)
-float Mode::crosstrack_error() const
+float Mode::crosstrack_error_m() const
 {
     if (!is_autopilot_mode()) {
         return 0.0f;
     }
-    return g2.wp_nav.crosstrack_error();
+    return g2.wp_nav.crosstrack_error_m();
 }
 
 // return desired lateral acceleration
@@ -302,7 +340,21 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     }
 #endif  // AP_AVOIDANCE_ENABLED
 
-    // call throttle controller and convert output to -100 to +100 range
+    // compute freshness-gated heading error BEFORE the PID calls so the I-term  
+    // can be frozen directly via the motor_limit parameters (not via  
+    // g2.motors.limit, which is cleared in output() before reaching the PID)  
+    bool steer_i_freeze = false;  
+    float yaw_error_rad = 0.0f;  
+    float yaw_error_deg = 0.0f;  
+    const bool steering_heading_fresh = _steering_heading_active_ms != 0 &&  
+        (AP_HAL::millis() - _steering_heading_active_ms) < 50;  
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
+        yaw_error_rad = wrap_180_cd(_steering_target_yaw_cd - ahrs.yaw_sensor) * (radians(1.0f) * 0.01f);
+        yaw_error_deg = fabsf(degrees(yaw_error_rad));  
+        steer_i_freeze = yaw_error_deg > g2.motors.get_steer_floor_ifreeze_deg();  
+    }  
+  
+    // call throttle controller and convert output to -100 to +100 range  
     float throttle_out = 0.0f;
 
     if (g2.sailboat.sail_enabled()) {
@@ -310,13 +362,13 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         g2.sailboat.get_throttle_and_set_mainsail(target_speed, throttle_out);
     } else {
         // call speed or stop controller
-        if (is_zero(target_speed) && !rover.is_balancebot()) {
-            bool stopped;
-            throttle_out = 100.0f * attitude_control.get_throttle_out_stop(g2.motors.limit.throttle_lower, g2.motors.limit.throttle_upper, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt, stopped);
-        } else {
-            bool motor_lim_low = g2.motors.limit.throttle_lower || attitude_control.pitch_limited();
-            bool motor_lim_high = g2.motors.limit.throttle_upper || attitude_control.pitch_limited();
-            throttle_out = 100.0f * attitude_control.get_throttle_out_speed(target_speed, motor_lim_low, motor_lim_high, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt);
+        if (is_zero(target_speed) && !rover.is_balancebot()) {  
+            bool stopped;  
+            throttle_out = 100.0f * attitude_control.get_throttle_out_stop(steer_i_freeze || g2.motors.limit.throttle_lower, steer_i_freeze || g2.motors.limit.throttle_upper, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt, stopped);  
+        } else {  
+            bool motor_lim_low = steer_i_freeze || g2.motors.limit.throttle_lower || attitude_control.pitch_limited();  
+            bool motor_lim_high = steer_i_freeze || g2.motors.limit.throttle_upper || attitude_control.pitch_limited();  
+            throttle_out = 100.0f * attitude_control.get_throttle_out_speed(target_speed, motor_lim_low, motor_lim_high, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt);  
         }
 
         // if vehicle is balance bot, calculate actual throttle required for balancing
@@ -325,7 +377,72 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
         }
     }
 
-    // send to motor
+    // pure nav/PID throttle before drift-FF add and floor injection - the coast  
+    // sampler must see PID demand only, else an active estimate blocks the gate
+    _throttle_nav_pct = throttle_out;  
+  
+    // steering-to-throttle floor and runaway prevention (vectored-thrust safety    
+    // fix). yaw_error_* and steer_i_freeze were computed above, before the PID    
+    // calls, so the I-term freeze already reached the controller this tick.    
+    // NOTE: cosine reduction runs on the PID part only - drift-FF is added    
+    // AFTER it below, otherwise FF would be zeroed exactly at large crab    
+    // angles where drift-hold needs it most    
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {    
+    
+        // 1. Cosine Throttle Reduction: reduce forward throttle at large heading error.  
+        // only scale forward thrust - a negative (braking) PID demand must pass  
+        // through unchanged, otherwise a heavy boat cannot decelerate during a  
+        // large heading change  
+        if (is_positive(throttle_out)) {    
+            throttle_out *= MAX(0.0f, cosf(yaw_error_rad));    
+        }    
+    } 
+    
+    // forward drift/current feed-forward: added directly to throttle output,    
+    // never to target_speed, so it doesn't shift the PID's ground-speed setpoint.    
+    // placed AFTER cosine reduction so a large crab angle does not erase the    
+    // exact thrust needed to hold position against drift    
+    Vector2f drift_body;      
+    if (get_drift_compensation_body(drift_body)) {    
+        const float expo = attitude_control.get_speed_thr_expo();    
+        const float cruise_speed = MAX(g.speed_cruise, 0.1f);    
+        const float throttle_cruise_frac = MAX(g.throttle_cruise * 0.01f, 0.01f);    
+    
+        // FF = plna nelinearna krivka vyhodnotena v |drift_body.x|, NIE lokalna    
+        // derivacia - pri target_speed=0 (loiter) je dThrottle/dv ~0 pre expo>1    
+        // a FF by sa prave v loiteri vypol. drzanie proti driftu vyzaduje    
+        // rovnaky tah ako jazda rychlostou drift_body.x. pocitane inline -    
+        // get_throttle_out_speed() je stavova PID slucka a druhe volanie v    
+        // ticku by skorumpovalo I/D termy a _desired_speed slew    
+        if (is_positive(drift_body.x)) {    
+            const float drift_ratio = drift_body.x / cruise_speed;    
+            // gain already applied at write-time - see get_drift_compensation_body()    
+            throttle_out += 100.0f * throttle_cruise_frac * powf(drift_ratio, expo);    
+        }    
+    }    
+  
+    if (g2.motors.have_vectored_thrust() && steering_heading_fresh) {  
+        // 2. Steering Thrust Floor: force minimum throttle to allow rotation
+        if (yaw_error_deg > g2.motors.get_steer_floor_deadband_deg()) {
+            const float steer_throttle_floor = constrain_float(    
+                (yaw_error_deg - g2.motors.get_steer_floor_deadband_deg()) * g2.motors.get_steer_floor_gain(),    
+                0.0f, g2.motors.get_steer_floor_max_pct());  
+            // do not override a throttle that is already stronger than the floor in    
+            // the same direction; only raise the magnitude, never flip its sign    
+            if (fabsf(throttle_out) < steer_throttle_floor) {    
+                throttle_out = is_negative(throttle_out) ? -steer_throttle_floor : steer_throttle_floor;    
+                _steer_floor_active = true;    
+            } else {    
+                _steer_floor_active = false;    
+            }    
+        } else {    
+            _steer_floor_active = false;    
+        }    
+    } else {    
+        _steer_floor_active = false;    
+    } 
+  
+    // send to motor    
     g2.motors.set_throttle(throttle_out);
 }
 
@@ -412,6 +529,166 @@ float Mode::calc_speed_nudge(float target_speed, bool reversed)
     }
 }
 
+// retrieve a current/wind drift estimate rotated into body frame (x=forward, y=right), m/s
+bool Mode::get_drift_compensation_body(Vector2f &drift_body) const
+{
+    if (g2.sailboat.sail_enabled()) {  
+        return false;  
+    } 
+    Vector2f drift_ne;
+    bool have_estimate = g2.motors.get_current_estimate_ne(drift_ne);
+    if (!have_estimate) {
+        return false;
+    }
+    // return the COMPENSATION vector (-drift), i.e. the own-velocity the boat  
+    // must produce to cancel the drift. x>0 = forward thrust needed, which is  
+    // exactly what the throttle FF in calc_throttle() expects  
+    drift_body = AP::ahrs().earth_to_body2D(-drift_ne);
+    return true;
+}
+
+// apply drift compensation to a desired heading (centi-degrees) and speed (m/s)
+void Mode::apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const    
+{    
+    // sailboats excluded as before (their own wind-relative logic)  
+    if (g2.sailboat.sail_enabled()) {    
+        return;    
+    }  
+  
+    Vector2f drift_ne;  
+    if (!g2.motors.get_current_estimate_ne(drift_ne) || drift_ne.is_zero()) {  
+        return;  
+    }  
+  
+    // kinematics: ground_vel = own_vel + drift  =>  own_vel = ground_desired - drift.  
+    // vector subtraction sets BOTH corrected heading AND corrected speed, so a  
+    // strong lateral current produces an up-current heading WITH enough throttle  
+    // (e.g. 0.8 m/s cross-current at 0.5 m/s target -> ~32deg, ~0.94 m/s),  
+    // not just a saturated crab angle at unchanged speed (old behaviour, which  
+    // could never converge when drift > desired_speed)  
+    const bool reversing = (desired_speed < 0.0f);  
+    const float des_hdg_rad = radians(desired_heading_cd * 0.01f);  
+    const Vector2f ground_desired_ne{cosf(des_hdg_rad) * desired_speed,  
+                                   sinf(des_hdg_rad) * desired_speed};  
+    const Vector2f own_required_ne = ground_desired_ne - drift_ne;  
+    if (own_required_ne.length_squared() < sq(0.05f)) {  
+        // drift alone already delivers the desired ground track - command zero  
+        // own speed and face up-drift so a drift change is caught immediately  
+        desired_heading_cd = wrap_360_cd(degrees(atan2f(-drift_ne.y, -drift_ne.x)) * 100.0f);  
+        desired_speed = 0.0f;  
+        return;  
+    }  
+  
+    desired_heading_cd = wrap_360_cd(degrees(atan2f(own_required_ne.y, own_required_ne.x)) * 100.0f);  
+  
+    // clamp magnitude only - direction stays optimal (up-current) even if the  
+    // required speed exceeds what the boat can do; in that case we physically  
+    // cannot hold the track, but pointing up-current at max speed is the best  
+    // achievable response  
+    const float speed_max = calc_speed_max(g.speed_cruise, 1.0f);  
+    desired_speed = MIN(own_required_ne.length(), speed_max);  
+  
+    // reversing modes: flip heading 180deg and negate speed - identical ground  
+    // vector, keeps the reversed convention agnostic  
+    if (reversing) {  
+        desired_heading_cd = wrap_360_cd(desired_heading_cd + 18000.0f);  
+        desired_speed = -desired_speed;  
+    }  
+}
+  
+// shared drift estimator - commanded vs actual NE displacement over a window  
+void Mode::update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms)  
+{  
+    const uint32_t now_ms = AP_HAL::millis();  
+  
+    // gate: only accumulate while conditions are steady enough to trust sample  
+    const float max_yaw_rate_dps = g2.motors.get_drift_est_yaw_rate_dps();  
+    const bool yaw_rate_ok = (max_yaw_rate_dps <= 0.0f) ||  
+        fabsf(degrees(ahrs.get_yaw_rate_earth())) < max_yaw_rate_dps;
+    Vector2p current_pos_ne;  
+    const bool pos_ok = ahrs.get_relative_position_NE_origin(current_pos_ne);  
+    const bool gate_ok = yaw_rate_ok && pos_ok;  
+  
+    // (re)start the window if it never started, or if a gate failure invalidated it  
+    if ((_drift_est_window_start_ms == 0) || !_drift_est_window_valid) {  
+        if (!gate_ok) {  
+            // can't even start a valid window this tick, nothing to do  
+            _drift_est_window_start_ms = 0;  
+            return;  
+        }  
+        _drift_est_window_start_ms = now_ms;  
+        _drift_est_last_update_ms = now_ms;  
+        _drift_est_actual_pos_start_ne_m = current_pos_ne;  
+        _drift_est_predicted_disp_ne_m.zero();  
+        _drift_est_ekf_reset_count = ahrs.get_position_NE_reset_count();  
+        _drift_est_window_valid = true;  
+        return;  
+    }
+  
+    // fix 2: if a gate fails mid-window, invalidate the whole window instead of  
+    // silently truncating it - a partially-steady window is not trustworthy  
+    if (!gate_ok) {  
+        _drift_est_window_valid = false;  
+        _drift_est_window_start_ms = 0;  
+        return;  
+    }  
+  
+    // fix 4: invalidate window on EKF position reset or a stale tick gap -  
+    // either means the accumulated predicted displacement no longer matches reality  
+    if ((ahrs.get_position_NE_reset_count() != _drift_est_ekf_reset_count) ||  
+        ((now_ms - _drift_est_last_update_ms) > DRIFT_EST_MAX_GAP_MS)) {
+        _drift_est_window_valid = false;  
+        _drift_est_window_start_ms = 0;  
+        return;  
+    } 
+  
+    // accumulate the commanded (pre-compensation) NE displacement for this tick  
+    const float dt = (now_ms - _drift_est_last_update_ms) * 0.001f;  
+    _drift_est_last_update_ms = now_ms;  
+    const float heading_rad = radians(commanded_heading_cd * 0.01f);  
+    _drift_est_predicted_disp_ne_m.x += cosf(heading_rad) * commanded_speed_ms * dt;  
+    _drift_est_predicted_disp_ne_m.y += sinf(heading_rad) * commanded_speed_ms * dt;  
+  
+    // window not finished yet  
+    if ((now_ms - _drift_est_window_start_ms) < uint32_t(DRIFT_EST_WINDOW_S * 1000.0f)) {  
+        return;  
+    }  
+  
+    // window complete: predicted displacement (from our own commands) vs actual  
+    // displacement (from EKF) - the difference is what the environment did to us  
+    const Vector2f actual_disp_ne_m = (current_pos_ne - _drift_est_actual_pos_start_ne_m).tofloat();  
+    const Vector2f predicted_disp_ne_m = _drift_est_predicted_disp_ne_m.tofloat();  
+    const float window_s = (now_ms - _drift_est_window_start_ms) * 0.001f;  
+    const Vector2f drift_ne_ms = (actual_disp_ne_m - predicted_disp_ne_m) / window_s;  
+  
+    // fix 3: simple disagreement gate against whatever is currently stored -  
+    // if the new sample disagrees too much with the current estimate, down-weight  
+    // it instead of blending it in at full trust. this protects against a single  
+    // noisy/short window corrupting a previously-good (e.g. Loiter-sourced) estimate.  
+    Vector2f current_ne;  
+    Vector2f drift_to_store = drift_ne_ms;  
+    uint32_t unused_age_ms = 0;  
+    bool unused_is_seeded = false;  
+    if (g2.motors.get_nav_estimate_ne(current_ne, unused_age_ms, unused_is_seeded)) {  
+        const float disagreement = (drift_ne_ms - current_ne).length();  
+        if (disagreement > DRIFT_EST_DISAGREE_GATE_MPS) {  
+            // don't discard outright - the environment may genuinely have changed -  
+            // but only move a fraction of the way towards the new sample this time  
+            drift_to_store = current_ne + (drift_ne_ms - current_ne) * 0.25f;  
+        }  
+    }  
+  
+    // gain (DRIFT_GAIN_NAV) is already applied inside set_nav_estimate_ne()  
+    // itself, at write-time - do not apply it again here.  
+    g2.motors.set_nav_estimate_ne(drift_to_store);  
+  
+    // start next window  
+    _drift_est_window_start_ms = now_ms;  
+    _drift_est_last_update_ms = now_ms;  
+    _drift_est_actual_pos_start_ne_m = current_pos_ne;  
+    _drift_est_predicted_disp_ne_m.zero();  
+}
+
 // high level call to navigate to waypoint
 // uses wp_nav to calculate turn rate and speed to drive along the path from origin to destination
 // this function updates _distance_to_destination
@@ -436,29 +713,61 @@ void Mode::navigate_to_waypoint()
     }
 #endif
 
-    // pass desired speed to throttle controller
+    // pass desired speed to throttle controller, biased by any current/wind drift estimate
     // do not do simple avoidance because this is already handled in the position controller
-    calc_throttle(g2.wp_nav.get_speed(), false);
+    float desired_speed = g2.wp_nav.get_speed();  
+    const float raw_heading_cd = g2.wp_nav.oa_wp_bearing_cd();  
+    float desired_heading_cd = raw_heading_cd;  
+    update_drift_estimator(raw_heading_cd, desired_speed);  
+    apply_drift_compensation(desired_heading_cd, desired_speed);  
+    calc_throttle(desired_speed, false);
 
-    float desired_heading_cd = g2.wp_nav.oa_wp_bearing_cd();
-    if (g2.sailboat.use_indirect_route(desired_heading_cd)) {
-        // sailboats use heading controller when tacking upwind
-        desired_heading_cd = g2.sailboat.calc_heading(desired_heading_cd);
+    // true only when drift compensation can actually be contributing anything --  
+    // used to fully restore the original calc_steering_from_turn_rate() path when  
+    // there is no valid (non-stale, non-zero) drift estimate from either source,  
+    // so DRIFT_GAIN_LOIT=0 and DRIFT_GAIN_NAV=0 together still act as a real  
+    // kill-switch for on-water isolation testing.  gain is now baked in at  
+    // write-time (see AP_MotorsUGV::set_loiter/nav_estimate_ne()), so this  
+    // reads the already-corrected vector instead of a separate gain param.  
+    Vector2f drift_comp_check_body;  
+    const bool drift_comp_active = get_drift_compensation_body(drift_comp_check_body) &&  
+        !drift_comp_check_body.is_zero();
+
+    if (g2.sailboat.use_indirect_route(raw_heading_cd)) {  
+        // sailboats use heading controller when tacking upwind (unaffected by drift gain,  
+        // this path pre-dates the drift-compensation work).  use the raw, pre-drift-  
+        // compensation bearing here - the drift estimator's crab-angle correction and  
+        // the sailboat's no-go-zone/tack decision both react to wind, and must not be  
+        // chained onto each other.  
+        desired_heading_cd = g2.sailboat.calc_heading(raw_heading_cd);
         // use pivot turn rate for tacks
         const float turn_rate = g2.sailboat.tacking() ? g2.wp_nav.get_pivot_rate() : 0.0f;
         calc_steering_to_heading(desired_heading_cd, turn_rate);
-    } else {
-        // retrieve turn rate from waypoint controller
-        float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();
-
+    } else if (drift_comp_active) {
         // if simple avoidance is active at very low speed do not attempt to turn
+#if AP_AVOIDANCE_ENABLED
+        if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {
+            calc_steering_from_turn_rate(0.0f);
+        } else
+#endif
+        {
+            // drive to the drift-corrected heading (includes crab-angle bias from
+            // apply_drift_compensation()). a rate-only controller cannot hold a
+            // steady heading offset (it would integrate forever), so this must go
+            // through the heading-closed-loop controller, not calc_steering_from_turn_rate().
+            // wp_nav's own turn-rate solution is reused as the rate ceiling/feed-forward
+            // so cornering aggressiveness stays close to stock behaviour.
+            calc_steering_to_heading(desired_heading_cd, fabsf(degrees(g2.wp_nav.get_turn_rate_rads())));
+        }
+    } else {
+        // DRIFT_GAIN_NAV == 0: exact original stock path, unmodified by any of this
+        // session's work, for clean on-water A/B isolation testing
+        float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();
 #if AP_AVOIDANCE_ENABLED
         if (g2.avoid.limits_active() && (fabsf(attitude_control.get_desired_speed()) <= attitude_control.get_stop_speed())) {
             desired_turn_rate_rads = 0.0f;
         }
 #endif
-
-        // call turn rate steering controller
         calc_steering_from_turn_rate(desired_turn_rate_rads);
     }
 }
@@ -493,9 +802,17 @@ void Mode::calc_steering_from_lateral_acceleration(float lat_accel, bool reverse
 
 // calculate steering output to drive towards desired heading
 // rate_max is a maximum turn rate in deg/s.  set to zero to use default turn rate limits
-void Mode::calc_steering_to_heading(float desired_heading_cd, float rate_max_degs)
-{
-    // call heading controller
+void Mode::calc_steering_to_heading(float desired_heading_cd, float rate_max_degs)  
+{  
+    // record the heading target and timestamp so calc_throttle() can compute a    
+    // trustworthy yaw error for the vectored-thrust steering floor. write to    
+    // the dedicated _steering_target_yaw_cd (NOT _desired_yaw_cd) so callers    
+    // holding the persistent commanded target there (Guided HeadingAndSpeed)    
+    // are not corrupted by a drift-compensated heading value.    
+    _steering_target_yaw_cd = desired_heading_cd;    
+    _steering_heading_active_ms = AP_HAL::millis();
+  
+    // call heading controller  
     const float steering_out = attitude_control.get_steering_out_heading(radians(desired_heading_cd*0.01f),
                                                                          radians(rate_max_degs),
                                                                          g2.motors.limit.steer_left,

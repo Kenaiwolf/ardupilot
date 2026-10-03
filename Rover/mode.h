@@ -97,7 +97,7 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     virtual float wp_bearing() const;
     virtual float nav_bearing() const;
-    virtual float crosstrack_error() const;
+    virtual float crosstrack_error_m() const;
     virtual float get_desired_lat_accel() const;
 
     // get speed error in m/s, not currently supported
@@ -107,7 +107,7 @@ public:
     // navigation methods
     //
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     virtual float get_distance_to_destination() const { return 0.0f; }
 
     // return desired location (used in Guided, Auto, RTL, etc)
@@ -184,8 +184,30 @@ protected:
     // calculates the amount of throttle that should be output based
     // on things like proximity to corners and current speed
     virtual void calc_throttle(float target_speed, bool avoidance_enabled);
-
-    // performs a controlled stop. returns true once vehicle has stopped
+    
+	// drift COMPENSATION vector (-drift) in body frame: x>0 = forward thrust  
+    // needed to cancel drift. returns false if no valid estimate  
+    bool get_drift_compensation_body(Vector2f &drift_body) const;
+  
+    // apply drift compensation to a desired heading (centi-degrees) and speed (m/s).  
+    // desired_heading_cd/desired_speed are updated in place.  no-op if no drift estimate available.  
+    void apply_drift_compensation(float &desired_heading_cd, float &desired_speed) const;  
+  
+    // drift estimator shared by all modes via navigate_to_waypoint() and Guided  
+    static constexpr float DRIFT_EST_WINDOW_S = 20.0f;           // window length (s)  
+    // DRIFT_EST_MAX_YAW_RATE_DPS moved to MOT_DRIFT_EST_YAWR parameter (tunable via GCS)
+    static constexpr uint32_t DRIFT_EST_MAX_GAP_MS = 200; // max tick gap before window is stale  
+    static constexpr uint32_t DRIFT_SEED_MIN_AGE_MS = 50; // min age (ms) a source estimate must have before it can be used to seed another mode's estimate
+    static constexpr float DRIFT_EST_DISAGREE_GATE_MPS = 0.75f;  // max accepted sample jump (m/s)  
+    void update_drift_estimator(float commanded_heading_cd, float commanded_speed_ms);  
+    Vector2f _drift_est_predicted_disp_ne_m;   // predicted NE displacement since window start (m)    
+    Vector2p _drift_est_actual_pos_start_ne_m; // actual NE position at window start (m)    
+    uint32_t _drift_est_window_start_ms = 0;   // window start time (0 = no window active)    
+    uint32_t _drift_est_last_update_ms = 0;    // last integrator update time    
+    bool     _drift_est_window_valid = false;  // false if any gate failed during current window    
+    uint16_t _drift_est_ekf_reset_count = 0;   // EKF NE-reset count at window start
+  
+    // performs a controlled stop. returns true once vehicle has stopped  
     bool stop_vehicle();
 
     // estimate maximum vehicle speed (in m/s)
@@ -217,10 +239,38 @@ protected:
     class RC_Channel *&channel_walking_height;
     class AR_AttitudeControl &attitude_control;
 
-    // private members for waypoint navigation
-    float _distance_to_destination; // distance from vehicle to final destination in meters
-    bool _reached_destination;  // true once the vehicle has reached the destination
-    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter
+    // private members for waypoint navigation  
+    float _distance_to_destination; // straight-line distance from vehicle to final destination in meters  
+    bool _reached_destination;  // true once the vehicle has reached the destination  
+    float _desired_yaw_cd;      // desired yaw in centi-degrees.  used by every mode  
+                                // calling calc_steering_to_heading(): Auto, Guided,  
+                                // Loiter, Simple and Follow      
+  
+    // heading target actually passed to the heading controller by the last    
+    // calc_steering_to_heading() call (may include drift compensation). kept    
+    // separate from _desired_yaw_cd so callers like Guided HeadingAndSpeed    
+    // don't get their persistent commanded target overwritten by the    
+    // compensated value (which would compound the crab angle every tick).    
+    // calc_throttle() uses THIS for the vectored-thrust floor yaw error.    
+    float _steering_target_yaw_cd = 0.0f;    
+  
+    // last calc_steering_to_heading() call time; the steering floor and cosine  
+    // throttle reduction in calc_throttle() apply to ALL heading-driven modes  
+    // (Auto/Guided/Loiter/Simple/Follow) while fresh (<50ms), so they  
+    // auto-expire on mode switch or when turn-rate/manual modes take over 
+    uint32_t _steering_heading_active_ms = 0; // millis() of last heading-mode steering request; 0 = never
+  
+    // nav/PID throttle demand before drift-FF add and steering-floor injection.  
+    // Fresh every tick from calc_throttle(); used by loiter drift sampler for  
+    // true-coast detection (get_throttle() reads post-floor output)  
+    float _throttle_nav_pct = 0.0f;  
+  
+    // true while the steering-to-throttle floor is actually injecting thrust.  
+    // drift samplers must not treat floor-thrust as "coasting"  
+    bool _steer_floor_active = false;
+  
+    // steering-floor and loiter-drift tunables live in AP_MotorsUGV as MOT_SFL_* /    
+    // MOT_LOIT_* GCS parameters - access via g2.motors.get_*() at the call site 
 };
 
 
@@ -268,10 +318,10 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error() const override;
+    float crosstrack_error_m() const override;
     float get_desired_lat_accel() const override;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override;
 
     // get or set desired location
@@ -289,7 +339,7 @@ public:
     bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2, int16_t &arg3, int16_t &arg4);
     void nav_script_time_done(uint16_t id);
 
-    // 
+    //
     void init_reversed_flag() override {
         if (!mission.is_resume()) {
             set_reversed(false);
@@ -443,13 +493,13 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error() const override { return dist_to_edge_m; }
+    float crosstrack_error_m() const override { return dist_to_edge_m; }
     float get_desired_lat_accel() const override;
 
     // set desired speed in m/s
     bool set_desired_speed(float speed_ms) override;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
 
     // get or set desired location
@@ -538,10 +588,10 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error() const override;
+    float crosstrack_error_m() const override;
     float get_desired_lat_accel() const override;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override;
 
     // return true if vehicle has reached destination
@@ -575,6 +625,9 @@ public:
     void limit_clear();
     void limit_init_time_and_location();
     bool limit_breached() const;
+
+    // return guided mode timeout in milliseconds. Only used for velocity and acceleration control
+    uint32_t get_timeout_ms() const;
 
 protected:
 
@@ -619,7 +672,7 @@ protected:
         float horiz_max;    // horizontal position limit in meters from where guided mode was initiated (0 = no limit)
         uint32_t start_time_ms; // system time in milliseconds that control was handed to the external computer
         Location start_loc; // starting location for checking horiz_max limit
-    } limit;
+    } limit;  
 };
 
 
@@ -659,12 +712,12 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override { return _desired_yaw_cd * 0.01f; }
     float nav_bearing() const override { return _desired_yaw_cd * 0.01f; }
-    float crosstrack_error() const override { return 0.0f; }
+    float crosstrack_error_m() const override { return 0.0f; }
 
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
 
 protected:
@@ -673,6 +726,28 @@ protected:
 
     Location _destination;      // target location to hold position around
     float _desired_speed;       // desired speed (ramped down from initial speed to zero)
+
+    // current/wind drift-estimate detection state  
+    static constexpr uint8_t LOITER_DRIFT_RISING_TICKS = 5;      // consecutive ticks of rising distance-error required before accepting a drift sample    
+    static constexpr uint8_t LOITER_DRIFT_ZERO_TICKS   = 5;      // consecutive in-window ticks with |I| below noise floor before a zero-drift sample is accepted
+    // LOITER_DRIFT_ROT_ANG_DEG moved to LOIT_ROT_ANG parameter (tunable via GCS)
+    // LOITER_DRIFT_ROT_RATE_DGS moved to LOIT_ROT_RATE  parameter (tunable via GCS)
+
+  
+    // method-2 sampling state: filtered I-term magnitude while the speed PID  
+    // is actively holding the vehicle against drift (decel-to-stop window)  
+    float _drift_i_filt = 0.0f;  
+    bool  _drift_i_filt_valid = false; 
+    float _drift_last_distance;     // distance to destination on the previous tick, used to detect a rising trend  
+    uint8_t _drift_rising_count;    // number of consecutive ticks distance-to-destination has been rising while coasting    
+    uint8_t _drift_zero_count = 0;  // consecutive equilibrium-window ticks with |I| below LOIT_I_MIN (pending zero-drift sample) 
+  
+    // hysteresis band on the loiter-radius boundary so heading logic does not  
+    // flap between "aim at center" and "aim into drift" while oscillating  
+    static constexpr float LOITER_RADIUS_HYST = 0.10f;   // 10% of loiter_radius  
+  
+    // sticky inside-circle state for the radius hysteresis  
+    bool _inside_loiter_circle = false;  
 };
 
 class ModeManual : public Mode
@@ -720,7 +795,7 @@ public:
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
     bool reached_destination() const override;
 
@@ -759,7 +834,7 @@ public:
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
     bool reached_destination() const override { return smart_rtl_state == SmartRTLState::StopAtHome; }
 
@@ -857,12 +932,12 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override { return wp_bearing(); }
-    float crosstrack_error() const override { return 0.0f; }
+    float crosstrack_error_m() const override { return 0.0f; }
 
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED { return false; }
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override;
 
     // set desired speed in m/s
@@ -924,7 +999,7 @@ public:
 
     bool is_autopilot_mode() const override { return true; }
 
-    // return distance (in meters) to destination
+    // return straight-line distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
 
     static const struct AP_Param::GroupInfo var_info[];

@@ -15,63 +15,314 @@ bool ModeLoiter::_enter()
     // initialise heading to current heading
     _desired_yaw_cd = ahrs.yaw_sensor;
 
-    return true;
+    // reset drift-estimate detection state so stale data from a previous
+    // loiter session doesn't leak into this one.  Compute distance fresh
+    // against the just-set _destination rather than reusing whatever the
+    // previous mode last left in _distance_to_destination.
+    _drift_last_distance = rover.current_loc.get_distance(_destination);    
+    _drift_rising_count = 0;    
+    _drift_zero_count = 0;    
+    _drift_i_filt_valid = false;    
+    _inside_loiter_circle = false;
+  
+    // handoff: seed loiter estimate from the nav-source value, weighted by age.  
+    // mirrors Mode::enter() - seeded sources accepted (timestamp preserved,  
+    // ping-pong converges to zero). guard: never overwrite a real measured  
+    // loiter estimate with a weighted seed copy.  
+  
+    Vector2f nav_ne;  
+    uint32_t nav_age_ms = 0;  
+    bool nav_is_seeded = false;  
+    Vector2f loiter_ne;  
+    uint32_t loiter_age_ms = 0;  
+    bool loiter_is_seeded = false;  
+    const bool loiter_has_real =  
+        g2.motors.get_loiter_estimate_ne(loiter_ne, loiter_age_ms, loiter_is_seeded) &&  
+        !loiter_is_seeded &&  
+        (loiter_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f));  
+    if (!loiter_has_real &&  
+        g2.motors.get_nav_estimate_ne(nav_ne, nav_age_ms, nav_is_seeded) &&  
+        (nav_age_ms >= DRIFT_SEED_MIN_AGE_MS) &&  
+        (nav_age_ms < uint32_t(g2.motors.get_drift_max_age_s() * 1000.0f))) {    
+        const float age_s = nav_age_ms * 0.001f;    
+        const float max_age_s = MAX(g2.motors.get_drift_max_age_s(), 0.1f);    
+        const float seed_weight = constrain_float(1.0f - (age_s / max_age_s), 0.0f, 1.0f);    
+        // nav_ne already has DRIFT_GAIN_NAV baked in - seed raw, do not    
+        // pass through set_loiter_estimate_ne() or DRIFT_GAIN_LOIT would be    
+        // applied on top of Guided's own gain    
+        g2.motors.seed_loiter_estimate_ne(nav_ne * seed_weight, AP_HAL::millis() - nav_age_ms);    
+    }
+  
+    return true;  
 }
 
-void ModeLoiter::update()
-{
-    // get distance (in meters) to destination
-    _distance_to_destination = rover.current_loc.get_distance(_destination);
-
-    const float loiter_radius = g2.sailboat.tack_enabled() ? g2.sailboat.get_loiter_radius() : g2.loit_radius;
-
-    // if within loiter radius slew desired speed towards zero and use existing desired heading
-    if (_distance_to_destination <= loiter_radius) {
-        // sailboats should not stop unless motoring
-        const float desired_speed_within_radius = g2.sailboat.tack_enabled() ? 0.1f : 0.0f;
-        _desired_speed = attitude_control.get_desired_speed_accel_limited(desired_speed_within_radius, rover.G_Dt);
-
-        // if we have a sail but not trying to use it then point into the wind
-        if (!g2.sailboat.tack_enabled() && g2.sailboat.sail_enabled()) {
-            _desired_yaw_cd = degrees(g2.windvane.get_true_wind_direction_rad()) * 100.0f;
+void ModeLoiter::update()  
+{  
+    // get distance (in meters) to destination  
+    _distance_to_destination = rover.current_loc.get_distance(_destination);  
+  
+    const float loiter_radius = g2.sailboat.tack_enabled() ? g2.sailboat.get_loiter_radius() : g2.loit_radius;  
+  
+    // sticky inside/outside state with a 10% hysteresis band so the heading    
+    // logic (aim-at-center vs aim-into-drift) does not flap at the boundary    
+    if (_inside_loiter_circle) {    
+        _inside_loiter_circle = (_distance_to_destination <= loiter_radius * (1.0f + LOITER_RADIUS_HYST));    
+    } else {    
+        _inside_loiter_circle = (_distance_to_destination <= loiter_radius);    
+    }    
+  
+    // if within loiter radius slew desired speed towards zero and use existing desired heading    
+    if (_inside_loiter_circle) {  
+        // sailboats should not stop unless motoring  
+        const float desired_speed_within_radius = g2.sailboat.tack_enabled() ? 0.1f : 0.0f;  
+        _desired_speed = attitude_control.get_desired_speed_accel_limited(desired_speed_within_radius, rover.G_Dt);  
+  
+        // if we have a sail but not trying to use it then point into the wind    
+        if (!g2.sailboat.tack_enabled() && g2.sailboat.sail_enabled()) {    
+            _desired_yaw_cd = degrees(g2.windvane.get_true_wind_direction_rad()) * 100.0f;    
+        }    
+  
+        // vectored-thrust drift hold: if a valid drift estimate exists, aim the    
+        // thruster INTO the drift (bow-pull convention: motor pulls the boat    
+        // opposite the drift vector). For a stern-push outboard invert by 180 deg.    
+        // This replaces heading-freeze: a frozen heading with a large error    
+        // would permanently trigger the steering floor and fight the drift-FF.    
+        Vector2f drift_ne;    
+        if (g2.motors.get_current_estimate_ne(drift_ne) &&    
+            drift_ne.length() > g2.motors.get_loit_drift_min_mps()) {   
+            // heading = bearing of -drift (point at where drift comes FROM...    
+            // i.e. thrust points opposite the drift velocity)    
+            _desired_yaw_cd = rad_to_cd(atan2f(-drift_ne.y, -drift_ne.x));    
+        } 
+  
+        // current/wind drift-estimate sampling: only trust a sample once distance-to-  
+        // destination has been consistently rising (i.e. the vehicle is being pushed  
+        // outward, not still decelerating from its last approach) AND throttle output  
+        // is effectively zero (pure coast, no thrust contribution to the motion)  
+        if (_distance_to_destination > _drift_last_distance) {  
+            _drift_rising_count++;  
+        } else {  
+            _drift_rising_count = 0;  
+        }  
+        _drift_last_distance = _distance_to_destination;  
+  
+        // gate on the pre-floor PID demand, not the motor output: the  
+        // steering-to-throttle floor can hold real thrust while the PID is  
+        // requesting zero, which would falsely disqualify a true coast  
+        // rotation gate: a deflected vectored thruster rotates the hull about  
+        // its pivot (~0.6m radius at 90deg), producing lateral IMU velocity  
+        // r*L_pivot (up to ~0.5m/s at 45deg/s) that is NOT drift. the single  
+        // bow thruster can never translate the hull sideways, so any measured  
+        // lateral velocity while NOT rotating is pure drift. block sampling  
+        // during rotation - detected by thruster deflection (cause) and yaw  
+        // rate (effect), both direct measurements, no estimation.  
+        const float vec_angle_deg = fabsf(degrees(g2.motors.get_vectored_angle_rad()));  
+        const float yaw_rate_degs = fabsf(degrees(ahrs.get_yaw_rate_earth()));  
+        const float rot_ang_deg = g2.motors.get_loit_rot_ang_deg();  
+        const float rot_rate_dps = g2.motors.get_loit_rot_rate_dps();  
+        const bool rotating = (rot_ang_deg > 0.0f && vec_angle_deg > rot_ang_deg) ||  
+                              (rot_rate_dps > 0.0f && yaw_rate_degs > rot_rate_dps);
+        if (_drift_rising_count >= LOITER_DRIFT_RISING_TICKS &&      
+            fabsf(_throttle_nav_pct) < g2.motors.get_loit_coast_thr_pct() &&      
+            !_steer_floor_active &&  
+            !rotating) {
+            Vector3f vel_ned;  
+            if (ahrs.get_velocity_NED(vel_ned)) {  
+                Vector2f sample_ne{vel_ned.x, vel_ned.y};  
+  
+                // measured coast velocity = drift + own FF push. the applied push  
+                // is the -drift compensation from get_drift_compensation_body()  
+                // (x>0 = forward push, same guard as in calc_throttle) -> subtract  
+                Vector2f comp_body;  
+                if (get_drift_compensation_body(comp_body) && is_positive(comp_body.x)) {  
+                    const Vector2f ff_body{comp_body.x, 0.0f};  
+                    sample_ne -= ahrs.body_to_earth2D(ff_body);  
+                }   
+    
+                g2.motors.set_loiter_estimate_ne(sample_ne);   
+            }    
+        }  
+  
+        // method 2: PID-residual drift measurement during the active  
+        // decel-to-stop window. while the speed PID is still running  
+        // (not yet "stopped", which would reset I), its I-term IS the  
+        // thrust needed to hold position against environmental drift.  
+        // equilibrium = commanded ~0, actual ~0, error small.  
+        const AP_PIDInfo& tinfo = attitude_control.get_throttle_speed_pid_info();  
+        // equilibrium = platné meracie okno (bez podmienky na |I| - nulový I  
+        // je legitimna vzorka, znamena "namerany drift = 0", nie "ziadna vzorka")  
+        const bool pid_in_equilibrium_window = is_zero(_desired_speed) &&  
+                                        !_steer_floor_active &&  
+                                        fabsf(tinfo.actual) <= fabsf(attitude_control.get_stop_speed()) &&  
+                                        fabsf(tinfo.error) <= g2.motors.get_loit_i_eq_err_mps();  
+        const bool pid_at_equilibrium = pid_in_equilibrium_window &&  
+                                        fabsf(tinfo.I) >= g2.motors.get_loit_i_min();
+        if (pid_at_equilibrium) {  
+            _drift_zero_count = 0;  // nonzero-I path - cancel pending zero window  
+            const float i_mag = fabsf(tinfo.I); 
+            if (!_drift_i_filt_valid) {  
+                _drift_i_filt = i_mag;  
+                _drift_i_filt_valid = true;  
+            } else {  
+                _drift_i_filt += (i_mag - _drift_i_filt) * g2.motors.get_loit_i_alpha();  
+            }  
+  
+            // convert filtered I (throttle fraction 0-1) to drift speed via the  
+            // inverse of the throttle->speed curve: v = cruise * (t/t_cruise)^(1/expo)  
+            const float cruise_speed = MAX(g.speed_cruise, 0.1f);  
+            const float cruise_thr = MAX(g.throttle_cruise * 0.01f, 0.01f);  
+            const float expo = attitude_control.get_speed_thr_expo();  
+  
+            // add back the drift FF currently applied by calc_throttle (mode.cpp).  
+            // I-term only holds the RESIDUAL after FF - without this a fully  
+            // compensated real drift reads as I~0 and the zero-sample path would  
+            // erase a correct estimate. FF was computed as the full curve value  
+            // at the estimate's forward body component, so its throttle  
+            // equivalent is reconstructed the same way  
+            Vector2f comp_body;  
+            float ff_frac = 0.0f;  
+            if (get_drift_compensation_body(comp_body) && is_positive(comp_body.x)) {  
+                ff_frac = cruise_thr * powf(comp_body.x / cruise_speed, expo);  
+            }  
+  
+            // clamp: if (I + FF) exceeds cruise throttle the powf() above  
+            // would extrapolate beyond the calibrated curve - cap at the  
+            // full-throttle speed ceiling, not cruise_speed, so currents  
+            // stronger than cruise are still representable  
+            const float drift_mag_mps = MIN(cruise_speed * powf((_drift_i_filt + ff_frac) / cruise_thr, 1.0f / expo),  
+                                            calc_speed_max(g.speed_cruise, 1.0f));
+  
+            // direction: the I-term holds position AGAINST the drift, so drift  
+            // points opposite to the thrust direction. thrust direction is  
+            // heading + vector angle (not directly observable here); use the  
+            // existing estimate's direction if we have one (it is updated by  
+            // method-1 coast samples), otherwise the measured velocity  
+            // direction if the boat is still sliding slightly.  
+            // direction: measured EVERY tick, same as magnitude. the previous  
+            // estimate is only a weighted prior so a noisy first measurement  
+            // doesn't swing the estimate - but a real direction change must  
+            // converge, never stay locked on the old heading  
+            Vector2f meas_dir_ne;  
+            {  
+                // source 1: residual velocity direction while still sliding  
+                Vector3f vel_ned;  
+                if (ahrs.get_velocity_NED(vel_ned)) {  
+                    const Vector2f v_ne{vel_ned.x, vel_ned.y};  
+                    if (v_ne.length_squared() > sq(0.02f)) {  
+                        meas_dir_ne = v_ne.normalized();  
+                    }  
+                }  
+            }  
+            if (meas_dir_ne.is_zero()) {  
+                // source 2 (boat fully at standstill): drift points opposite the  
+                // actual thrust vector. thrust dir in earth frame = yaw + thruster  
+                // steering angle. get_steering() is centideg (+/-4500) -  
+                // normalise to -1..1 first, THEN multiply by max angle in radians  
+                const float steer_ang_rad = (g2.motors.get_steering() / 4500.0f)  
+                                            * radians(g2.motors.get_vector_angle_max());  
+                // assumes bow-pull thruster convention: thrust dir = yaw + steer  
+                // angle. for a stern-push or inverted-output thruster this is  
+                // 180deg off - flip the sign of meas_dir_ne below if needed.  
+                const float thrust_rad = ahrs.get_yaw_rad() + steer_ang_rad;  
+                // drift vector = opposite of the force that holds us in place  
+                meas_dir_ne = Vector2f{-cosf(thrust_rad), -sinf(thrust_rad)};  
+            }  
+  
+            Vector2f est_dir_ne = meas_dir_ne;  
+            Vector2f prev_ne;  
+            if (g2.motors.get_current_estimate_ne(prev_ne) &&  
+                prev_ne.length_squared() > sq(0.01f)) {  
+                // prev direction is a prior with weight 0.65, fresh measurement  
+                // has 0.35 - converges within a few ticks on real changes,  
+                // still damps single-tick noise  
+                est_dir_ne = meas_dir_ne * 0.35f + prev_ne.normalized() * 0.65f;  
+                if (est_dir_ne.is_zero()) {  
+                    // near-opposite vectors cancelled out - trust the fresh  
+                    // measurement (a ~180deg flip is exactly the case where the  
+                    // old direction was wrong)  
+                    est_dir_ne = meas_dir_ne;  
+                } else {  
+                    est_dir_ne.normalize();  
+                }  
+            }  
+  
+            if (!est_dir_ne.is_zero()) {  
+                Vector2f new_est = est_dir_ne * drift_mag_mps;  
+                // NAV-style disagreement gate: don't jump to a very different  
+                // estimate in one shot, blend a fraction of the way  
+                if (g2.motors.get_current_estimate_ne(prev_ne)) {  
+                    const Vector2f dv = new_est - prev_ne;  
+                    if (dv.length() > g2.motors.get_loit_i_disagree() * MAX(prev_ne.length(), 0.1f)) {  
+                        new_est = prev_ne + dv * 0.25f;  
+                    }  
+                }  
+                g2.motors.set_loiter_estimate_ne(new_est);  
+            }
+        } else if (pid_in_equilibrium_window) {  
+            // meracie okno platne ale |I| pod sumovym prahom = drift sa realne  
+            // nameria ako ~0. drz to vsetko niekolko tickov aby to nebol nahodny  
+            // prechod, potom zapis nulovu vzorku - bez nej by sa stary odhad  
+            // "zasekol" az do DRIFT_MAXAGE ked vietor/prud zhasne  
+            if (++_drift_zero_count >= LOITER_DRIFT_ZERO_TICKS) {  
+                Vector2f prev_ne;  
+                Vector2f zero_est{0.0f, 0.0f};  
+                if (g2.motors.get_current_estimate_ne(prev_ne) && !prev_ne.is_zero()) {  
+                    // disagreement-blend aj pri ceste k nule, rovnako ako pri  
+                    // normalnych vzorkach - nie skokovy reset  
+                    zero_est = prev_ne * 0.75f;  
+                }  
+                g2.motors.set_loiter_estimate_ne(zero_est);  
+            }  
+            _drift_i_filt_valid = false;  
+        } else {    
+            // PID left equilibrium (still decelerating hard, or already    
+            // stopped with I reset) - decay validity so a stale filtered    
+            // value isn't reused after conditions change    
+            _drift_i_filt_valid = false;  
+            _drift_zero_count = 0;  
         }
-    } else {
+    } else {    
+        _drift_rising_count = 0;  
+        _drift_zero_count = 0;  
         // P controller with hard-coded gain to convert distance to desired speed
-        _desired_speed = MIN((_distance_to_destination - loiter_radius) * g2.loiter_speed_gain, g2.wp_nav.get_default_speed());
-
-        // calculate bearing to destination
-        _desired_yaw_cd = rover.current_loc.get_bearing_to(_destination);
-        float yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);
-        // if destination is behind vehicle, reverse towards it
-        if ((fabsf(yaw_error_cd) > 9000 && g2.loit_type == 0) || g2.loit_type == 2) {
-            _desired_yaw_cd = wrap_180_cd(_desired_yaw_cd + 18000);
-            yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);
-            _desired_speed = -_desired_speed;
-        }
-
-        // reduce desired speed if yaw_error is large
-        // 45deg of error reduces speed to 75%, 90deg of error reduces speed to 50%
-        float yaw_error_ratio = 1.0f - constrain_float(fabsf(yaw_error_cd / 9000.0f), 0.0f, 1.0f) * 0.5f;
-        _desired_speed *= yaw_error_ratio;
-    }
-
-    // 0 turn rate is no limit
-    float turn_rate = 0.0;
-
-    // make sure sailboats don't try and sail directly into the wind
-    if (g2.sailboat.use_indirect_route(_desired_yaw_cd)) {
-        _desired_yaw_cd = g2.sailboat.calc_heading(_desired_yaw_cd);
-        if (g2.sailboat.tacking()) {
-            // use pivot turn rate for tacks
-            turn_rate = g2.wp_nav.get_pivot_rate();
-        }
-    }
-
-    // run steering and throttle controllers
-    calc_steering_to_heading(_desired_yaw_cd, turn_rate);
-    calc_throttle(_desired_speed, true);
+        _desired_speed = MIN((_distance_to_destination - loiter_radius) * g2.loiter_speed_gain, g2.wp_nav.get_default_speed());  
+  
+        // calculate bearing to destination  
+        _desired_yaw_cd = rover.current_loc.get_bearing_to(_destination);  
+        float yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);  
+        // if destination is behind vehicle, reverse towards it  
+        if ((fabsf(yaw_error_cd) > 9000 && g2.loit_type == 0) || g2.loit_type == 2) {  
+            _desired_yaw_cd = wrap_180_cd(_desired_yaw_cd + 18000);  
+            yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);  
+            _desired_speed = -_desired_speed;  
+        }  
+  
+        // compensate for current/wind drift while driving back to the loiter center  
+        apply_drift_compensation(_desired_yaw_cd, _desired_speed);  
+        yaw_error_cd = wrap_180_cd(_desired_yaw_cd - ahrs.yaw_sensor);  
+  
+        // reduce desired speed if yaw_error is large  
+        // 45deg of error reduces speed to 75%, 90deg of error reduces speed to 50%  
+        float yaw_error_ratio = 1.0f - constrain_float(fabsf(yaw_error_cd / 9000.0f), 0.0f, 1.0f) * 0.5f;  
+        _desired_speed *= yaw_error_ratio;  
+    }  
+  
+    // 0 turn rate is no limit  
+    float turn_rate = 0.0;  
+  
+    // make sure sailboats don't try and sail directly into the wind  
+    if (g2.sailboat.use_indirect_route(_desired_yaw_cd)) {  
+        _desired_yaw_cd = g2.sailboat.calc_heading(_desired_yaw_cd);  
+        if (g2.sailboat.tacking()) {  
+            // use pivot turn rate for tacks  
+            turn_rate = g2.wp_nav.get_pivot_rate();  
+        }  
+    }  
+  
+    // run steering and throttle controllers  
+    calc_steering_to_heading(_desired_yaw_cd, turn_rate);  
+    calc_throttle(_desired_speed, true);  
 }
-
 // get desired location
 bool ModeLoiter::get_desired_location(Location& destination) const
 {

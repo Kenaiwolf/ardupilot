@@ -72,32 +72,9 @@ MAV_STATE GCS_MAVLINK_Rover::vehicle_system_status() const
     return MAV_STATE_ACTIVE;
 }
 
-void GCS_MAVLINK_Rover::send_position_target_global_int()
+bool GCS_MAVLINK_Rover::get_target_location(Location &target) const
 {
-    Location target;
-    if (!rover.control_mode->get_desired_location(target)) {
-        return;
-    }
-    static constexpr uint16_t POSITION_TARGET_TYPEMASK_LAST_BYTE = 0xF000;
-    static constexpr uint16_t TYPE_MASK = POSITION_TARGET_TYPEMASK_VX_IGNORE | POSITION_TARGET_TYPEMASK_VY_IGNORE | POSITION_TARGET_TYPEMASK_VZ_IGNORE |
-                                          POSITION_TARGET_TYPEMASK_AX_IGNORE | POSITION_TARGET_TYPEMASK_AY_IGNORE | POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-                                          POSITION_TARGET_TYPEMASK_YAW_IGNORE | POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE | POSITION_TARGET_TYPEMASK_LAST_BYTE;
-    mavlink_msg_position_target_global_int_send(
-        chan,
-        AP_HAL::millis(), // time_boot_ms
-        MAV_FRAME_GLOBAL, // targets are always global altitude
-        TYPE_MASK, // ignore everything except the x/y/z components
-        target.lat, // latitude as 1e7
-        target.lng, // longitude as 1e7
-        target.alt * 0.01f, // altitude is sent as a float
-        0.0f, // vx
-        0.0f, // vy
-        0.0f, // vz
-        0.0f, // afx
-        0.0f, // afy
-        0.0f, // afz
-        0.0f, // yaw
-        0.0f); // yaw_rate
+    return rover.control_mode->get_desired_location(target);
 }
 
 void GCS_MAVLINK_Rover::send_nav_controller_output() const
@@ -108,16 +85,46 @@ void GCS_MAVLINK_Rover::send_nav_controller_output() const
 
     const Mode *control_mode = rover.control_mode;
 
-    mavlink_msg_nav_controller_output_send(
-        chan,
-        0,  // roll
-        degrees(rover.g2.attitude_control.get_desired_pitch()),
-        control_mode->nav_bearing(),
-        control_mode->wp_bearing(),
-        MIN(control_mode->get_distance_to_destination(), UINT16_MAX),
-        0,
-        control_mode->speed_error(),
-        control_mode->crosstrack_error());
+    mavlink_msg_nav_controller_output_send(  
+        chan,  
+        0,  // roll  
+        degrees(rover.g2.attitude_control.get_desired_pitch()),  
+        control_mode->nav_bearing(),  
+        control_mode->wp_bearing(),  
+        MIN(control_mode->get_distance_to_destination(), UINT16_MAX),  
+        0,  
+        control_mode->speed_error(),  
+        control_mode->crosstrack_error_m());  
+  
+    // drift/current estimate as named floats for live GCS graphing.  
+    // send_named_float broadcasts to ALL channels (send_to_active_channels),  
+    // while this function runs once per channel - gate to MAVLINK_COMM_0 so  
+    // each value is sent exactly once regardless of link count. Also  
+    // auto-writes an NVF record to DataFlash.  
+    // get_current_estimate_ne returns false when the estimate is stale, so  
+    // nothing is sent outside modes where the estimator runs.  
+    if (chan == MAVLINK_COMM_0) {  
+        Vector2f drift_ne{};  
+        if (rover.g2.motors.get_current_estimate_ne(drift_ne)) {  
+            gcs().send_named_float("DRIFTN", drift_ne.x);  
+            gcs().send_named_float("DRIFTE", drift_ne.y);  
+            gcs().send_named_float("DRIFTSPD", drift_ne.length());  
+        }  
+        // per-slot diagnostics: age tells whether sampling is alive (age rising  
+        // = gate blocking samples, e.g. during pivot turns), seeded tells  
+        // whether the estimate came from a mode-entry seed or from real samples  
+        Vector2f slot_ne{};  
+        uint32_t slot_age_ms = 0;  
+        bool slot_seeded = false;  
+        if (rover.g2.motors.get_nav_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {  
+            gcs().send_named_float("DRIFTNAGE", slot_age_ms * 0.001f);  
+            gcs().send_named_float("DRIFTNSED", slot_seeded ? 1.0f : 0.0f);  
+        }  
+        if (rover.g2.motors.get_loiter_estimate_ne(slot_ne, slot_age_ms, slot_seeded)) {  
+            gcs().send_named_float("DRIFTLAGE", slot_age_ms * 0.001f);  
+            gcs().send_named_float("DRIFTLSED", slot_seeded ? 1.0f : 0.0f);  
+        }  
+    }  
 }
 
 int16_t GCS_MAVLINK_Rover::vfr_hud_throttle() const
@@ -524,40 +531,10 @@ MAV_RESULT GCS_MAVLINK_Rover::handle_command_int_packet(const mavlink_command_in
         }
         return MAV_RESULT_FAILED;
 
-#if AP_MAVLINK_MAV_CMD_NAV_SET_YAW_SPEED_ENABLED
-    case MAV_CMD_NAV_SET_YAW_SPEED:
-        send_received_message_deprecation_warning("MAV_CMD_NAV_SET_YAW_SPEED");
-        return handle_command_nav_set_yaw_speed(packet, msg);
-#endif
-
     default:
         return GCS_MAVLINK::handle_command_int_packet(packet, msg);
     }
 }
-
-#if AP_MAVLINK_MAV_CMD_NAV_SET_YAW_SPEED_ENABLED
-MAV_RESULT GCS_MAVLINK_Rover::handle_command_nav_set_yaw_speed(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
-{
-        // param1 : yaw angle (may be absolute or relative)
-        // param2 : Speed - in metres/second
-        // param3 : 0 = param1 is absolute, 1 = param1 is relative
-
-        // exit if vehicle is not in Guided mode
-        if (!rover.control_mode->in_guided_mode()) {
-            return MAV_RESULT_FAILED;
-        }
-
-        // get final angle, 1 = Relative, 0 = Absolute
-        if (packet.param3 > 0) {
-            // relative angle
-            rover.mode_guided.set_desired_heading_delta_and_speed(packet.param1 * 100.0f, packet.param2);
-        } else {
-            // absolute angle
-            rover.mode_guided.set_desired_heading_and_speed(packet.param1 * 100.0f, packet.param2);
-        }
-        return MAV_RESULT_ACCEPTED;
-}
-#endif
 
 MAV_RESULT GCS_MAVLINK_Rover::handle_command_int_do_reposition(const mavlink_command_int_t &packet)
 {
@@ -566,10 +543,6 @@ MAV_RESULT GCS_MAVLINK_Rover::handle_command_int_do_reposition(const mavlink_com
         return MAV_RESULT_DENIED;
     }
 
-    // sanity check location
-    if (!check_latlng(packet.x, packet.y)) {
-        return MAV_RESULT_DENIED;
-    }
     if (packet.x == 0 && packet.y == 0) {
         return MAV_RESULT_DENIED;
     }
