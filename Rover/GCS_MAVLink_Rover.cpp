@@ -117,7 +117,7 @@ void GCS_MAVLINK_Rover::send_nav_controller_output() const
         MIN(control_mode->get_distance_to_destination(), UINT16_MAX),  
         0,  
         control_mode->speed_error(),  
-        control_mode->crosstrack_error_m());  
+        control_mode->crosstrack_error());  
   
     // drift/current estimate as named floats for live GCS graphing.  
     // send_named_float broadcasts to ALL channels (send_to_active_channels),  

@@ -97,7 +97,7 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     virtual float wp_bearing() const;
     virtual float nav_bearing() const;
-    virtual float crosstrack_error_m() const;
+    virtual float crosstrack_error() const;
     virtual float get_desired_lat_accel() const;
 
     // get speed error in m/s, not currently supported
@@ -318,7 +318,7 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error_m() const override;
+    float crosstrack_error() const override;
     float get_desired_lat_accel() const override;
 
     // return straight-line distance (in meters) to destination
@@ -493,7 +493,7 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error_m() const override { return dist_to_edge_m; }
+    float crosstrack_error() const override { return dist_to_edge_m; }
     float get_desired_lat_accel() const override;
 
     // set desired speed in m/s
@@ -588,7 +588,7 @@ public:
     // return heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override;
-    float crosstrack_error_m() const override;
+    float crosstrack_error() const override;
     float get_desired_lat_accel() const override;
 
     // return straight-line distance (in meters) to destination
@@ -712,7 +712,7 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override { return _desired_yaw_cd * 0.01f; }
     float nav_bearing() const override { return _desired_yaw_cd * 0.01f; }
-    float crosstrack_error_m() const override { return 0.0f; }
+    float crosstrack_error() const override { return 0.0f; }
 
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
@@ -932,7 +932,7 @@ public:
     // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
     float wp_bearing() const override;
     float nav_bearing() const override { return wp_bearing(); }
-    float crosstrack_error_m() const override { return 0.0f; }
+    float crosstrack_error() const override { return 0.0f; }
 
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED { return false; }
